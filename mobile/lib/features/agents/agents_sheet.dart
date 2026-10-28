@@ -51,7 +51,14 @@ class _AgentsNavigation extends HookConsumerWidget {
     final communityId = ref.watch(activeCommunityProvider).asData?.value?.id;
     // Signing out of Builderlab hides every agent surface, including this one.
     ref.listen(remoteAgentsEnabledProvider, (_, enabled) {
-      if (!enabled) Navigator.of(context).pop();
+      if (enabled) return;
+      // Create agent is a separate root modal above this sheet; close both.
+      final sheet = ModalRoute.of(context);
+      Navigator.of(
+        context,
+        rootNavigator: true,
+      ).popUntil((route) => route == sheet || route is! PopupRoute);
+      if (sheet != null && sheet.isCurrent) Navigator.of(context).pop();
     });
     final navigator = useMemoized(() => GlobalKey<NavigatorState>(), [
       communityId,
