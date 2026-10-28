@@ -19,7 +19,7 @@ use crate::{
     nostr_convert,
     relay::{
         assert_expected_relay_scope, assert_expected_signer, query_relay, submit_event,
-        submit_event_at_created_at, submit_event_with_keys_created_at,
+        submit_event_at_created_at, submit_event_at_with_keys, submit_event_with_keys_created_at,
     },
 };
 
@@ -924,13 +924,22 @@ pub async fn edit_message(
 pub async fn delete_message(
     channel_id: String,
     event_id: String,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
     let target_eid = EventId::from_hex(&event_id).map_err(|e| format!("invalid event ID: {e}"))?;
+    let relay_base = crate::relay::relay_api_base_url_with_override(&state);
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    let keys = state.signing_keys()?;
+    assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &keys.public_key().to_hex(),
+    )?;
     let builder = events::build_delete_compat(channel_uuid, target_eid)?;
-    submit_event(builder, &state).await?;
+    submit_event_at_with_keys(builder, &state, &relay_base, &keys).await?;
     Ok(())
 }
 
@@ -969,3 +978,7 @@ fn feed_item_from_event(ev: &nostr::Event, category: FeedItemCategory) -> FeedIt
 #[cfg(test)]
 #[path = "messages_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "report_action_scope_tests.rs"]
+mod report_action_scope_tests;

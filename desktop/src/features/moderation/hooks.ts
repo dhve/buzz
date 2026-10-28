@@ -1,9 +1,16 @@
+import {
+  assertModerationScope,
+  type ModerationScope,
+} from "@/shared/api/moderationScope";
+import { getChannelDetails } from "@/shared/api/tauri";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import {
   banMember,
   listRestrictions,
+  listReports,
+  resolveReport,
   type ReportType,
   submitReport,
   timeoutMember,
@@ -109,3 +116,62 @@ export function useUntimeoutMemberMutation() {
 }
 
 export type { ReportType };
+
+// The key includes both the community and signer even inside the community
+// QueryClient. No queued response can become another community's report list.
+export function useCommunityReportsQuery(
+  scope: ModerationScope | undefined,
+  status: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      "communityReports",
+      scope?.relayUrl,
+      scope?.signerPubkey,
+      status,
+    ],
+    enabled: enabled && !!scope,
+    queryFn: () => listReports({ status, limit: 500 }, scope),
+    staleTime: 0,
+    retry: false,
+  });
+}
+
+export function useResolveReportMutation(scope: ModerationScope) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Parameters<typeof resolveReport>[0]) =>
+      resolveReport(input, scope),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: ["communityReports", scope.relayUrl, scope.signerPubkey],
+      }),
+  });
+}
+
+export function useModerationReportChannelQuery(
+  scope: ModerationScope | undefined,
+  channelId: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      "channels",
+      channelId ?? "none",
+      "detail",
+      scope?.relayUrl,
+      scope?.signerPubkey,
+    ],
+    enabled: enabled && !!scope && !!channelId,
+    retry: false,
+    staleTime: 0,
+    queryFn: async () => {
+      if (!scope || !channelId) throw new Error("No report channel selected.");
+      await assertModerationScope(scope);
+      const channel = await getChannelDetails(channelId);
+      await assertModerationScope(scope);
+      return channel;
+    },
+  });
+}

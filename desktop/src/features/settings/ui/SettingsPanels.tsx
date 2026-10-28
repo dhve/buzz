@@ -1,8 +1,10 @@
+import { CommunityReportsPanel } from "@/features/moderation/ui/CommunityReportsPanel";
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
   BellRing,
+  Flag,
   Bot,
   ChevronDown,
   Cpu,
@@ -92,6 +94,7 @@ export type SettingsSection =
   | "appearance"
   | "shortcuts"
   | "hosted-communities"
+  | "community-reports"
   | "community-members"
   | "relay-admin"
   | "custom-emoji"
@@ -112,6 +115,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "appearance",
   "shortcuts",
   "hosted-communities",
+  "community-reports",
   "community-members",
   "relay-admin",
   "custom-emoji",
@@ -202,6 +206,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "hosted-communities",
     label: "Hosted communities",
     icon: MessagesSquare,
+  },
+  {
+    value: "community-reports",
+    label: "Reports",
+    icon: Flag,
   },
   {
     value: "community-members",
@@ -844,6 +853,8 @@ export function renderSettingsSection(
       return <KeyboardShortcutsCard />;
     case "hosted-communities":
       return <HostedCommunitiesSettingsCard />;
+    case "community-reports":
+      return <CommunityReportsPanel />;
     case "community-members":
       return (
         <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />

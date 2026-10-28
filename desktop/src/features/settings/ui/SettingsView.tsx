@@ -67,7 +67,12 @@ export const settingsNavGroups: Array<{
   },
   {
     label: "Communities",
-    sections: ["hosted-communities", "community-members", "relay-admin"],
+    sections: [
+      "hosted-communities",
+      "community-members",
+      "community-reports",
+      "relay-admin",
+    ],
   },
   {
     label: "App",
@@ -146,7 +151,7 @@ export function SettingsView({
       }
       // Invites and member management require a discovered owner/admin role.
       // Open relays have no membership snapshot or invite controls.
-      if (s.value === "community-members") {
+      if (s.value === "community-members" || s.value === "community-reports") {
         return canManageCommunityMembers(myMembershipQuery.data);
       }
       // Relay admin surfaces the relay admin console. Always reachable so an
@@ -173,10 +178,21 @@ export function SettingsView({
   }, []);
 
   React.useEffect(() => {
+    if (
+      section === "community-reports" &&
+      (myMembershipQuery.isPending || myMembershipQuery.isError)
+    )
+      return;
     if (!visibleSections.some((entry) => entry.value === section)) {
       onSectionChange(visibleSections[0]?.value ?? "appearance");
     }
-  }, [onSectionChange, section, visibleSections]);
+  }, [
+    onSectionChange,
+    section,
+    visibleSections,
+    myMembershipQuery.isPending,
+    myMembershipQuery.isError,
+  ]);
 
   React.useEffect(() => {
     if (!isMobile && !sidebarOpen) {
@@ -258,7 +274,7 @@ export function SettingsView({
               data-testid="community-access-loading"
             >
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Checking invite permissions…
+              Checking community management permissions…
             </div>
           ) : null}
           {myMembershipQuery.isError ? (
@@ -268,7 +284,7 @@ export function SettingsView({
             >
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-3.5 w-3.5 text-destructive" />
-                Invite settings could not be checked.
+                Community management permissions could not be checked.
               </div>
               <button
                 className="flex items-center gap-1.5 font-medium text-sidebar-foreground underline-offset-2 hover:underline"
@@ -286,8 +302,8 @@ export function SettingsView({
               data-testid="community-access-snapshot-missing"
             >
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-              Invite settings are unavailable. Relay recovery may still be in
-              progress.
+              Community management settings are unavailable. Relay recovery may
+              still be in progress.
             </div>
           ) : null}
           {visibleNavGroups.map((group) => (
