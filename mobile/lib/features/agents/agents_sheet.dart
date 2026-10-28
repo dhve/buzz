@@ -14,6 +14,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
@@ -48,6 +49,10 @@ class _AgentsNavigation extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final communityId = ref.watch(activeCommunityProvider).asData?.value?.id;
+    // Signing out of Builderlab hides every agent surface, including this one.
+    ref.listen(remoteAgentsEnabledProvider, (_, enabled) {
+      if (!enabled) Navigator.of(context).pop();
+    });
     final navigator = useMemoized(() => GlobalKey<NavigatorState>(), [
       communityId,
     ]);
@@ -123,7 +128,6 @@ class AgentsSheet extends HookConsumerWidget {
     useListenable(controller);
     final flow = ref.watch(hostedFlowProvider);
     useListenable(flow);
-    final signingIn = flow.reconnecting && flow.stage != HostedFlowStage.idle;
     // Account sign-in belongs to the shared hosted flow; reload once it lands.
     useEffect(() {
       if (flow.reconnecting && flow.stage == HostedFlowStage.complete) {
@@ -133,17 +137,16 @@ class AgentsSheet extends HookConsumerWidget {
     }, [flow.stage]);
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final directory = ref.watch(agentDirectoryProvider);
+    final registeredKeys = {
+      for (final agent in controller.agents) agent['agent_pubkey'] as String,
+    };
+    // Key on the agents' identities, not the list instance: each refresh
+    // replaces the list, and refetching would blank the shown agents.
+    final registeredKey = (registeredKeys.toList()..sort()).join(',');
     final registryFuture = useMemoized(() async {
       final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
-      return ownedCommunityAgents(
-        {
-          for (final agent in controller.agents)
-            agent['agent_pubkey'] as String,
-        },
-        controller.owner,
-        fetch,
-      );
-    }, [community?.relayUrl, controller.agents, controller.owner]);
+      return ownedCommunityAgents(registeredKeys, controller.owner, fetch);
+    }, [community?.relayUrl, registeredKey, controller.owner]);
     final registered = useFuture(registryFuture, preserveState: false);
     final keys = {
       ...?registered.data,
@@ -162,6 +165,26 @@ class AgentsSheet extends HookConsumerWidget {
     keys.sort((a, b) => names.labelFor(a).compareTo(names.labelFor(b)));
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
+    Future<void> openCreate() async {
+      if (community == null) return;
+      creating.value = true;
+      try {
+        await showBuzzModalBottomSheet<bool>(
+          context: context,
+          useRootNavigator: true,
+          isScrollControlled: true,
+          showCloseButton: false,
+          builder: (_) => CreateAgentSheet(
+            controller: controller,
+            community: community,
+            onCreated: () => ref.invalidate(agentDirectoryProvider),
+          ),
+        );
+      } finally {
+        if (context.mounted) creating.value = false;
+      }
+    }
+
     final failed = directory.hasError || registered.hasError;
     final loading =
         !creating.value &&
@@ -187,24 +210,7 @@ class AgentsSheet extends HookConsumerWidget {
           tooltip: 'Add agent',
           onPressed: community == null || controller.busy || creating.value
               ? null
-              : () async {
-                  creating.value = true;
-                  try {
-                    await showBuzzModalBottomSheet<bool>(
-                      context: context,
-                      useRootNavigator: true,
-                      isScrollControlled: true,
-                      showCloseButton: false,
-                      builder: (_) => CreateAgentSheet(
-                        controller: controller,
-                        community: community,
-                        onCreated: () => ref.invalidate(agentDirectoryProvider),
-                      ),
-                    );
-                  } finally {
-                    if (context.mounted) creating.value = false;
-                  }
-                },
+              : openCreate,
           icon: const Icon(Icons.add),
         ),
         child: Material(
@@ -215,22 +221,13 @@ class AgentsSheet extends HookConsumerWidget {
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.sm),
               children: [
-                if (loading) const LinearProgressIndicator(),
-                if (controller.account.account == null)
-                  ListTile(
-                    title: const Text('Sign in to create an agent'),
-                    trailing: TextButton(
-                      onPressed: controller.busy || signingIn
-                          ? null
-                          : () => unawaited(flow.reconnectAccount()),
-                      child: const Text('Sign in'),
-                    ),
+                // Refreshes stay silent once agents are listed; only an
+                // empty first load shows a spinner, where the empty state goes.
+                if (loading && keys.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(Grid.sm),
+                    child: Center(child: BuzzLoadingIndicator(size: 22)),
                   ),
-                if (!controller.busy &&
-                    controller.account.account != null &&
-                    controller.status.isNotEmpty &&
-                    !creating.value)
-                  ListTile(subtitle: Text(controller.status)),
                 if (failed)
                   ListTile(
                     title: const Text('Could not load agents'),

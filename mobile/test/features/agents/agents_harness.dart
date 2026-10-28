@@ -45,12 +45,20 @@ class GatedController extends RelayFakeController {
     Community community,
     String name, {
     String instructions = '',
+    String? modelId,
+    String? reasoningEffort,
   }) {
     submittedName = name;
     submittedInstructions = instructions;
     final gate = this.gate;
     if (gate == null) {
-      return super.create(community, name, instructions: instructions);
+      return super.create(
+        community,
+        name,
+        instructions: instructions,
+        modelId: modelId,
+        reasoningEffort: reasoningEffort,
+      );
     }
     return run(() async {
       await gate.future;
