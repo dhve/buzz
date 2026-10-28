@@ -85,8 +85,13 @@ void main() {
             .onPressed,
         isNull,
       );
+      int catalogLoads() =>
+          h.registry.calls.where((call) => call == 'get-model-catalog').length;
+      final loadsBeforeFailure = catalogLoads();
       controller.gate!.complete();
       await tester.pumpAndSettle();
+      // A rejected choice may be stale, so the catalog reloads.
+      expect(catalogLoads(), loadsBeforeFailure + 1);
       expect(find.byType(BottomSheet), findsNWidgets(2));
       expect(find.text('Creation failed. Retry.'), findsOneWidget);
       expect(controller.submittedName, 'Scout');

@@ -42,6 +42,7 @@ class FakeRegistry extends BuilderlabAccountClient {
   ValueListenable<String?> get subjectChanges => _changes;
   bool failInstructions = false;
   Completer<void>? catalogGate;
+  bool failListing = false;
   bool rejectRegistration = false;
   bool loseRegistration = false;
   bool refuseRegistration = false;
@@ -85,6 +86,7 @@ class FakeRegistry extends BuilderlabAccountClient {
           ],
         };
       case '/v3/beekeeper/list-agents':
+        if (failListing) throw StateError('Registry unavailable.');
         return {'status': 1, 'agents': listed};
       case '/v3/beekeeper/register-agent':
         if (refuseRegistration) throw AccountFailure.rejected;

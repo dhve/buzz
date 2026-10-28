@@ -190,6 +190,7 @@ class RemoteAgentController extends ChangeNotifier {
     owner = null;
     pending = null;
     deletedAgents = {};
+    listingFailed = false;
     _scope = null;
   }
 
@@ -250,7 +251,21 @@ class RemoteAgentController extends ChangeNotifier {
     _notify();
   }
 
+  /// Whether the last registry listing failed, so an outage never reads as
+  /// an empty registry.
+  bool listingFailed = false;
+
   Future<void> refresh() async {
+    try {
+      await _refresh();
+      listingFailed = false;
+    } catch (_) {
+      listingFailed = true;
+      rethrow;
+    }
+  }
+
+  Future<void> _refresh() async {
     final session = account.account ?? await account.restore();
     if (session == null) {
       _clearAccountState();

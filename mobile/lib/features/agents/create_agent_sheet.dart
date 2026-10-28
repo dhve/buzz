@@ -105,6 +105,8 @@ class CreateAgentSheet extends HookConsumerWidget {
         Navigator.pop(context, true);
       } else {
         error.value = controller.failure;
+        // The server may have rejected a choice the catalog no longer offers.
+        retryCatalog();
       }
     }
 

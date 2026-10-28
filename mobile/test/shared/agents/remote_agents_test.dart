@@ -105,6 +105,16 @@ void main() {
     expect(container.read(remoteAgentsEnabledProvider), isFalse);
   });
 
+  test('a failed listing is reported instead of an empty registry', () async {
+    final registry = FakeRegistry(bound: fakeOwner.public)..failListing = true;
+    final controller = await _controller(registry);
+    expect(await controller.run(controller.refresh), isFalse);
+    expect(controller.listingFailed, isTrue);
+    registry.failListing = false;
+    expect(await controller.run(controller.refresh), isTrue);
+    expect(controller.listingFailed, isFalse);
+  });
+
   test('listing requires a signed-in account bound to the saved key', () async {
     final registry = FakeRegistry(bound: fakeOwner.public, signedIn: false);
     final controller = await _controller(registry);

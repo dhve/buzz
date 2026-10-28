@@ -185,7 +185,8 @@ class AgentsSheet extends HookConsumerWidget {
       }
     }
 
-    final failed = directory.hasError || registered.hasError;
+    final failed =
+        controller.listingFailed || directory.hasError || registered.hasError;
     final loading =
         !creating.value &&
         (controller.busy ||
