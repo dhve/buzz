@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ModerationReport,
   ResolutionAction,
@@ -17,6 +17,7 @@ type Props = {
   source: RelayEvent | null;
   scope: ModerationScope;
   onInvalidate: () => void;
+  onReviewBlockedChange?: (blocked: boolean) => void;
   onComplete: (action: ResolutionAction) => void;
 };
 
@@ -25,6 +26,7 @@ export function CommunityReportActions({
   source,
   scope,
   onInvalidate,
+  onReviewBlockedChange,
   onComplete,
 }: Props) {
   const [reason, setReason] = useState("");
@@ -43,6 +45,9 @@ export function CommunityReportActions({
     result?.stage === "enforcement" ||
     result?.stage === "decision" ||
     (result?.stage === "validation" && result.enforced);
+  useEffect(() => {
+    onReviewBlockedChange?.(busy || !!locked);
+  }, [busy, locked, onReviewBlockedChange]);
   const retry =
     result &&
     result.stage !== "complete" &&
@@ -53,6 +58,7 @@ export function CommunityReportActions({
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
+    onReviewBlockedChange?.(true);
     onInvalidate();
     const next = await applyReportDecision(
       report,

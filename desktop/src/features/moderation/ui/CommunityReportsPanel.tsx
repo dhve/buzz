@@ -13,6 +13,7 @@ import {
 import { readReportTarget } from "../lib/reportActions";
 import { useCommunityModerationScope } from "../useCommunityModerationScope";
 import { CommunityReportActions } from "./CommunityReportActions";
+import { ModerationJudgeReview } from "./ModerationJudgeReview";
 
 export function CommunityReportsPanel() {
   const membership = useMyRelayMembershipLookupQuery();
@@ -31,6 +32,7 @@ export function CommunityReportsPanel() {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [reviewGeneration, setReviewGeneration] = useState(0);
+  const [humanReviewBlocked, setHumanReviewBlocked] = useState(false);
   const selectionGeneration = useRef(0);
   const queryClient = useQueryClient();
   const invalidateReview = useCallback(
@@ -76,9 +78,6 @@ export function CommunityReportsPanel() {
     )
       await reports.refetch();
   };
-  // Task 4 integration: reviewGeneration changes before human actions, refresh,
-  // selection or observed role/source changes. Render ModerationJudgeReview here
-  // with report=selected, source, scope and onInvalidate=invalidateReview.
   const observedOpenChannelEligible =
     channel.isSuccess &&
     !channel.isFetching &&
@@ -96,6 +95,7 @@ export function CommunityReportsPanel() {
     channel.fetchStatus,
     String(channel.error ?? ""),
     reviewGeneration,
+    humanReviewBlocked,
   ]);
 
   return (
@@ -175,15 +175,37 @@ export function CommunityReportsPanel() {
                     </p>
                   ) : null}
                 </article>
-                <div
-                  data-review-context={reviewContextKey}
-                  data-review-eligible={
-                    observedOpenChannelEligible &&
-                    !!source &&
-                    !sourceLoading &&
-                    !sourceError
-                  }
-                />
+                {scope ? (
+                  <ModerationJudgeReview
+                    report={selected}
+                    source={source}
+                    scope={scope}
+                    contextKey={reviewContextKey}
+                    eligible={
+                      allowed &&
+                      observedOpenChannelEligible &&
+                      !!source &&
+                      !sourceLoading &&
+                      !sourceError &&
+                      !humanReviewBlocked
+                    }
+                    ineligibleReason={
+                      humanReviewBlocked
+                        ? "Finish the human decision or its recovery before requesting AI advice."
+                        : channel.isPending || channel.isFetching
+                          ? "Checking channel eligibility for AI review…"
+                          : channel.isError
+                            ? "Channel eligibility could not be checked. Human review remains available."
+                            : channel.data?.visibility === "private"
+                              ? "AI review is unavailable for private channels."
+                              : channel.data?.channelType === "dm"
+                                ? "AI review is unavailable for direct messages."
+                                : !source || sourceLoading || sourceError
+                                  ? "The eligible message source could not be confirmed."
+                                  : undefined
+                    }
+                  />
+                ) : null}
                 {scope ? (
                   <CommunityReportActions
                     key={`${scope.relayUrl}:${scope.signerPubkey}:${selected.reportEventId}`}
@@ -191,6 +213,7 @@ export function CommunityReportsPanel() {
                     source={source}
                     scope={scope}
                     onInvalidate={invalidateReview}
+                    onReviewBlockedChange={setHumanReviewBlocked}
                     onComplete={(action) => {
                       invalidateReview();
                       setSelected((previous) =>

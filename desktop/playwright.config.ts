@@ -171,6 +171,7 @@ export default defineConfig({
         "**/claude-effort-picker.spec.ts",
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
+        "**/community-reports.spec.ts",
         "**/observer-archive-policy.spec.ts",
         "**/harness-management.spec.ts",
         "**/harness-catalog-screenshots.spec.ts",
