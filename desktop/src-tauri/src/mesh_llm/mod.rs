@@ -1,3 +1,4 @@
+mod judge;
 use std::collections::BTreeMap;
 
 mod coordinator;
@@ -948,3 +949,7 @@ pub(super) fn dedupe_models(models: Vec<MeshModelOption>) -> Vec<MeshModelOption
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+#[cfg(all(test, feature = "mesh-llm"))]
+#[path = "../moderation_judge/live_tests.rs"]
+mod live_tests;

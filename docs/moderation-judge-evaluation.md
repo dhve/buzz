@@ -73,9 +73,12 @@ The ignored `mesh_llm::live_tests::isolated_relay_and_real_local_model` test sta
 Prepare a separate local relay with its own database, Redis and synthetic owners/members. Never point the fixture at an existing workspace. Seed an open eligible kind-9 report in an explicitly open stream/forum channel. A synthetic report note should contain `REPORTER_NOTE_CANARY` and the source text must be unique. Save the fixture outside the smoke runtime root, with mode 0600 and these fields:
 
 ```text
-relayUrl, channelId, reportEventId, sourceEventId,
-ownerPrivateKey, ownerPubkey, memberPrivateKey
+relayUrl, alternateRelayUrl, channelId, reportEventId, sourceEventId,
+ownerPrivateKey, ownerPubkey, memberPrivateKey, adminPrivateKey,
+guestPrivateKey, channelAdminPrivateKey, revokedPrivateKey
 ```
+
+The fixture must include a current community admin, an ordinary member, a channel guest without community membership, a community member with channel-admin status only, and an admin whose community role was revoked to member. Verify the revoked identity could read the queue before revocation. Seed the exact same signed channel, source, and report events in both loopback communities, with the owner authorized in each. Keep both reports open. The second origin must resolve to the separately configured community even if it uses the same relay process.
 
 The fixture is read only and must never be committed. The main report stays open throughout this test. The test rejects non-loopback relay hosts and requires dedicated non-default Mesh HTTP/console ports.
 
@@ -105,6 +108,8 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml --features mesh-llm \
 
 Expected output identifies either `schema_valid` or `safe_invalid_response`, the actual local model ID, Mesh version, platform, policy/prompt versions and measured latency. The tiny smoke model may fail the result schema. A safe rejection proves the error path was exercised, and makes no statement about moderation quality. Other errors fail the test.
 
-The second operation cancels after the adapter is entered and waits for the adapter to return and the admission guard to clear. If the model finishes before cancellation, the test fails with an explicit race message. A member request must return `inaccessible` without another model lease. The test then shuts down the runtime and scans its isolated files for source and reporter-note canaries. It omits raw prompts, source text, completion text and keys from its own output.
+The second operation cancels after the adapter is entered and waits for the adapter to return and the admission guard to clear. If the model finishes before cancellation, the test fails with an explicit race message. A member request must return `inaccessible` without another model lease. A separate authorization matrix runs the production service and fresh real relay reads for admin, member, guest, channel-only admin and revoked admin. It invokes the actual loaded runtime adapter for binding and local model selection, then uses a controlled completion for the successful admin case. Denied roles must never reach backend leasing. The alternate community uses the same event/report IDs and the runtime still bound to the first community; its canonical reads must succeed, then the actual adapter must reject before completion content is passed. These probes add no GGUF generations.
+
+The test then shuts down the runtime and scans its isolated files for source and reporter-note canaries. It omits raw prompts, source text, completion text and keys from its own output.
 
 The file scan detects plaintext canary persistence within the configured runtime directories. It does not establish absence of token-ID persistence, unconfigured external paths or remote traffic. The SDK's production routing/capture/cancellation tests and an independent review remain required. No peers are introduced by this smoke, so routing exclusion under available remote peers is a separate deterministic runtime test. Full desktop UI checks and explicit human testing remain separate gates.
