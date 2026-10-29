@@ -48,6 +48,15 @@ export function judgeErrorCode(error: unknown): JudgeErrorCode {
   return "unavailable";
 }
 const text = (max: number) => z.string().min(1).max(max);
+// Match Rust's Unicode scalar bounds; lone UTF-16 surrogates are not scalars.
+const scalarText = (max: number) =>
+  z
+    .string()
+    .min(1)
+    .refine(
+      (value) =>
+        Array.from(value).length <= max && !/[\uD800-\uDFFF]/u.test(value),
+    );
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const resultSchema = z
   .object({
@@ -55,11 +64,15 @@ const resultSchema = z
     matches: z
       .array(
         z
-          .object({ rule_id: text(64), evidence: text(128), reason: text(256) })
+          .object({
+            rule_id: text(64),
+            evidence: scalarText(128),
+            reason: scalarText(256),
+          })
           .strict(),
       )
       .max(3),
-    uncertainty: text(256).nullable(),
+    uncertainty: scalarText(256).nullable(),
     provenance: z
       .object({
         sourceDigest: digest,
