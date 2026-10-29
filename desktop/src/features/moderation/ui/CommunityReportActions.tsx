@@ -1,77 +1,56 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   ModerationReport,
   ResolutionAction,
 } from "@/shared/api/moderation";
-import type { ModerationScope } from "@/shared/api/moderationScope";
 import type { RelayEvent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
+import type { ReportDecision } from "../lib/reportActions";
 import {
-  applyReportDecision,
-  type ReportActionResult,
-  type ReportDecision,
-} from "../lib/reportActions";
+  canRetryReportDecision,
+  isReportAttemptLocked,
+  type ReportActionAttempt,
+} from "../useReportActionAttempt";
 
 type Props = {
   report: ModerationReport;
   source: RelayEvent | null;
-  scope: ModerationScope;
-  onInvalidate: () => void;
+  attempt: ReportActionAttempt | null;
+  available: boolean;
+  onSubmit: (decision: ReportDecision, decisionOnly?: boolean) => Promise<void>;
   onReviewBlockedChange?: (blocked: boolean) => void;
-  onComplete: (action: ResolutionAction) => void;
 };
 
 export function CommunityReportActions({
   report,
   source,
-  scope,
-  onInvalidate,
+  attempt,
+  available,
+  onSubmit,
   onReviewBlockedChange,
-  onComplete,
 }: Props) {
-  const [reason, setReason] = useState("");
+  const [draftReason, setReason] = useState(
+    () => attempt?.decision.reason ?? "",
+  );
   const [minutes, setMinutes] = useState(60);
-  const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
-  const [result, setResult] = useState<ReportActionResult | null>(null);
+  const busy = !!attempt?.pending;
+  const result = attempt?.result;
   const hasAuthor = report.targetKind === "pubkey" || !!source;
   const canUseChannel =
     report.targetKind === "event" &&
     !!source &&
     !!report.channelId &&
     source.tags.some((tag) => tag[0] === "h" && tag[1] === report.channelId);
-  const locked =
-    result?.stage === "complete" ||
-    result?.stage === "enforcement" ||
-    result?.stage === "decision" ||
-    (result?.stage === "validation" && result.enforced);
+  const locked = isReportAttemptLocked(attempt);
+  const reason =
+    busy || locked ? (attempt?.decision.reason ?? draftReason) : draftReason;
   useEffect(() => {
-    onReviewBlockedChange?.(busy || !!locked);
-  }, [busy, locked, onReviewBlockedChange]);
-  const retry =
-    result &&
-    result.stage !== "complete" &&
-    (result.stage === "decision" || result.enforced)
-      ? result.decision
-      : null;
-  async function submit(decision: ReportDecision, decisionOnly = false) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
+    onReviewBlockedChange?.(busy || locked || !available);
+  }, [busy, locked, available, onReviewBlockedChange]);
+  const retry = canRetryReportDecision(attempt) ? attempt?.decision : null;
+  function submit(decision: ReportDecision, decisionOnly = false) {
     onReviewBlockedChange?.(true);
-    onInvalidate();
-    const next = await applyReportDecision(
-      report,
-      decision,
-      scope,
-      decisionOnly,
-    );
-    if (scope.isCurrent()) {
-      setResult(next);
-      if (next.stage === "complete") onComplete(decision.action);
-      setBusy(false);
-    }
-    busyRef.current = false;
+    void onSubmit(decision, decisionOnly);
   }
   const choose = (action: ResolutionAction) =>
     void submit({
@@ -98,7 +77,7 @@ export function CommunityReportActions({
           className="block min-h-24 w-full rounded-md border bg-background p-2 text-sm"
           value={reason}
           onChange={(event) => setReason(event.target.value)}
-          disabled={busy || !!locked}
+          disabled={busy || !!locked || !available}
           maxLength={2000}
         />
       </label>
@@ -106,6 +85,12 @@ export function CommunityReportActions({
         Write this yourself. It may appear in a reporter notice or public
         message removal notice. Do not include private report notes.
       </p>
+      {!available ? (
+        <p role="status">
+          The report could not be confirmed as open in this queue. Return to
+          reports and refresh before another decision.
+        </p>
+      ) : null}
       {!locked && report.status === "open" ? (
         <>
           {hasAuthor ? (
@@ -115,7 +100,7 @@ export function CommunityReportActions({
                 aria-label="Timeout duration"
                 className="rounded border bg-background p-2 text-sm"
                 value={minutes}
-                disabled={busy}
+                disabled={busy || !available}
                 onChange={(event) => setMinutes(Number(event.target.value))}
               >
                 <option value={60}>1 hour</option>
@@ -126,13 +111,13 @@ export function CommunityReportActions({
           ) : null}
           <div className="flex flex-wrap gap-2">
             <Button
-              disabled={busy || !reason.trim()}
+              disabled={busy || !reason.trim() || !available}
               onClick={() => choose("dismiss")}
             >
               Dismiss
             </Button>
             <Button
-              disabled={busy || !reason.trim()}
+              disabled={busy || !reason.trim() || !available}
               onClick={() => choose("escalate")}
             >
               Escalate
@@ -141,13 +126,13 @@ export function CommunityReportActions({
               <>
                 <Button
                   variant="destructive"
-                  disabled={busy || !reason.trim()}
+                  disabled={busy || !reason.trim() || !available}
                   onClick={() => choose("ban")}
                 >
                   Ban member
                 </Button>
                 <Button
-                  disabled={busy || !reason.trim()}
+                  disabled={busy || !reason.trim() || !available}
                   onClick={() => choose("timeout")}
                 >
                   Time out member
@@ -158,13 +143,13 @@ export function CommunityReportActions({
               <>
                 <Button
                   variant="destructive"
-                  disabled={busy || !reason.trim()}
+                  disabled={busy || !reason.trim() || !available}
                   onClick={() => choose("delete")}
                 >
                   Delete message
                 </Button>
                 <Button
-                  disabled={busy || !reason.trim()}
+                  disabled={busy || !reason.trim() || !available}
                   onClick={() => choose("kick")}
                 >
                   Kick from channel
@@ -192,7 +177,10 @@ export function CommunityReportActions({
             {result.error}
           </p>
           {retry ? (
-            <Button disabled={busy} onClick={() => void submit(retry, true)}>
+            <Button
+              disabled={busy || !available}
+              onClick={() => void submit(retry, true)}
+            >
               Retry decision only
             </Button>
           ) : null}

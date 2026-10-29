@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { canManageCommunityMembers } from "@/shared/api/relayMembers";
@@ -12,6 +11,10 @@ import {
 } from "../hooks";
 import { readReportTarget } from "../lib/reportActions";
 import { useCommunityModerationScope } from "../useCommunityModerationScope";
+import {
+  isReportAttemptLocked,
+  useReportActionAttempt,
+} from "../useReportActionAttempt";
 import { CommunityReportActions } from "./CommunityReportActions";
 import { ModerationJudgeReview } from "./ModerationJudgeReview";
 
@@ -23,6 +26,16 @@ export function CommunityReportsPanel() {
   const [status, setStatus] = useState("open");
   const reports = useCommunityReportsQuery(scope, status, allowed);
   const [selected, setSelected] = useState<ModerationReport | null>(null);
+  const observedReport = reports.data?.find(
+    (report) => report.reportEventId === selected?.reportEventId,
+  );
+  const selectedReportAvailable =
+    reports.isSuccess &&
+    !reports.isFetching &&
+    observedReport?.status === "open" &&
+    observedReport.targetKind === selected?.targetKind &&
+    observedReport.target === selected?.target &&
+    observedReport.channelId === selected?.channelId;
   const channel = useModerationReportChannelQuery(
     scope,
     selected?.channelId ?? null,
@@ -32,13 +45,37 @@ export function CommunityReportsPanel() {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [reviewGeneration, setReviewGeneration] = useState(0);
-  const [humanReviewBlocked, setHumanReviewBlocked] = useState(false);
+  const [humanReviewSignal, setHumanReviewBlocked] = useState(false);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const selectionGeneration = useRef(0);
-  const queryClient = useQueryClient();
   const invalidateReview = useCallback(
     () => setReviewGeneration((generation) => generation + 1),
     [],
   );
+
+  const { attempt, submit } = useReportActionAttempt(
+    selected,
+    scope,
+    invalidateReview,
+    (completedReportEventId, action) => {
+      if (selectedRef.current?.reportEventId !== completedReportEventId) return;
+      invalidateReview();
+      setSelected((previous) =>
+        previous?.reportEventId === completedReportEventId
+          ? {
+              ...previous,
+              status: action === "dismiss" ? "dismissed" : "resolved",
+            }
+          : previous,
+      );
+    },
+  );
+  const humanReviewBlocked =
+    humanReviewSignal ||
+    !!attempt?.pending ||
+    isReportAttemptLocked(attempt) ||
+    !selectedReportAvailable;
 
   useEffect(() => {
     const generation = ++selectionGeneration.current;
@@ -70,6 +107,7 @@ export function CommunityReportsPanel() {
   const refresh = async () => {
     invalidateReview();
     setSelected(null);
+    setHumanReviewBlocked(false);
     const currentMembership = await membership.refetch();
     if (
       currentMembership.isSuccess &&
@@ -96,6 +134,11 @@ export function CommunityReportsPanel() {
     String(channel.error ?? ""),
     reviewGeneration,
     humanReviewBlocked,
+    observedReport,
+    reports.status,
+    reports.fetchStatus,
+    String(reports.error ?? ""),
+    selectedReportAvailable,
   ]);
 
   return (
@@ -132,6 +175,7 @@ export function CommunityReportsPanel() {
                   onClick={() => {
                     invalidateReview();
                     setSelected(null);
+                    setHumanReviewBlocked(false);
                   }}
                 >
                   Back to reports
@@ -143,7 +187,17 @@ export function CommunityReportsPanel() {
                   <h2 className="text-base font-semibold">
                     {selected.reportType} report
                   </h2>
-                  <p>Status: {selected.status}</p>
+                  <p>
+                    Status:{" "}
+                    {attempt?.result?.stage === "complete"
+                      ? attempt.decision.action === "dismiss"
+                        ? "dismissed"
+                        : "resolved"
+                      : (observedReport?.status ??
+                        (reports.isError
+                          ? "Unavailable"
+                          : "No longer in this queue"))}
+                  </p>
                   <p>
                     Target ({selected.targetKind}): {selected.target}
                   </p>
@@ -177,7 +231,7 @@ export function CommunityReportsPanel() {
                 </article>
                 {scope ? (
                   <ModerationJudgeReview
-                    report={selected}
+                    report={observedReport ?? selected}
                     source={source}
                     scope={scope}
                     contextKey={reviewContextKey}
@@ -190,19 +244,21 @@ export function CommunityReportsPanel() {
                       !humanReviewBlocked
                     }
                     ineligibleReason={
-                      humanReviewBlocked
-                        ? "Finish the human decision or its recovery before requesting AI advice."
-                        : channel.isPending || channel.isFetching
-                          ? "Checking channel eligibility for AI review…"
-                          : channel.isError
-                            ? "Channel eligibility could not be checked. Human review remains available."
-                            : channel.data?.visibility === "private"
-                              ? "AI review is unavailable for private channels."
-                              : channel.data?.channelType === "dm"
-                                ? "AI review is unavailable for direct messages."
-                                : !source || sourceLoading || sourceError
-                                  ? "The eligible message source could not be confirmed."
-                                  : undefined
+                      !selectedReportAvailable
+                        ? "The selected report could not be confirmed as open in the current queue. Refresh reports before requesting AI advice."
+                        : humanReviewBlocked
+                          ? "Finish the human decision or its recovery before requesting AI advice."
+                          : channel.isPending || channel.isFetching
+                            ? "Checking channel eligibility for AI review…"
+                            : channel.isError
+                              ? "Channel eligibility could not be checked. Human review remains available."
+                              : channel.data?.visibility === "private"
+                                ? "AI review is unavailable for private channels."
+                                : channel.data?.channelType === "dm"
+                                  ? "AI review is unavailable for direct messages."
+                                  : !source || sourceLoading || sourceError
+                                    ? "The eligible message source could not be confirmed."
+                                    : undefined
                     }
                   />
                 ) : null}
@@ -211,30 +267,15 @@ export function CommunityReportsPanel() {
                     key={`${scope.relayUrl}:${scope.signerPubkey}:${selected.reportEventId}`}
                     report={selected}
                     source={source}
-                    scope={scope}
-                    onInvalidate={invalidateReview}
-                    onReviewBlockedChange={setHumanReviewBlocked}
-                    onComplete={(action) => {
-                      invalidateReview();
-                      setSelected((previous) =>
-                        previous
-                          ? {
-                              ...previous,
-                              status:
-                                action === "dismiss" ? "dismissed" : "resolved",
-                            }
-                          : null,
-                      );
-                      void queryClient.invalidateQueries({
-                        queryKey: [
-                          "communityReports",
-                          scope.relayUrl,
-                          scope.signerPubkey,
-                        ],
-                      });
-                      void queryClient.invalidateQueries({
-                        queryKey: ["moderationRestrictions"],
-                      });
+                    attempt={attempt}
+                    available={selectedReportAvailable}
+                    onSubmit={submit}
+                    onReviewBlockedChange={(blocked) => {
+                      if (
+                        selectedRef.current?.reportEventId ===
+                        selected.reportEventId
+                      )
+                        setHumanReviewBlocked(blocked);
                     }}
                   />
                 ) : null}
@@ -297,6 +338,7 @@ export function CommunityReportsPanel() {
                         onClick={() => {
                           invalidateReview();
                           setSelected(report);
+                          setHumanReviewBlocked(false);
                         }}
                       >
                         <span className="font-medium">

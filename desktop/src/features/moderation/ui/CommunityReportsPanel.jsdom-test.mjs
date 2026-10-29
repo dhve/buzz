@@ -8,6 +8,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, getByRole, queryByRole } from "@testing-library/react";
 import { renderSettingsSection } from "@/features/settings/ui/SettingsPanels.tsx";
 import { relayClient } from "@/shared/api/relayClient";
+import { emitChange } from "@/shared/features/useFeatureEnabled";
+import { createModerationJudgeFixture } from "@/testing/moderationJudgeFixture";
 
 const me = "ab".repeat(32),
   author = "cd".repeat(32),
@@ -55,10 +57,12 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
     relay: "wss://community.example",
     beforeSign: null,
     beforeFetch: null,
+    beforeAck: null,
     role,
     targetVisible: true,
     targetEvent: structuredClone(canonical),
     operations: [],
+    judgeCalls: [],
   };
   const deliver = (frame) =>
     relayClient.handleWsMessage(
@@ -66,9 +70,23 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
       relayClient.connectionGeneration,
     );
   relayClient.wsId = 7;
+  const judgeFixture = createModerationJudgeFixture();
   const ipc = {
     transformCallback: () => 1,
     invoke: async (cmd, args) => {
+      if (
+        [
+          "moderation_judge_status",
+          "review_moderation_report",
+          "cancel_moderation_review",
+        ].includes(cmd)
+      ) {
+        state.judgeCalls.push({ cmd, args });
+        const response = await judgeFixture(cmd, args, { mode: "success" });
+        if (cmd === "review_moderation_report" && state.beforeJudge)
+          await state.beforeJudge();
+        return response;
+      }
       if (cmd === "get_identity")
         return { pubkey: state.identity, display_name: "Reviewer" };
       if (cmd === "get_relay_ws_url") return state.relay;
@@ -136,9 +154,15 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
           state.sent.push(frame[1]);
           state.operations.push(frame[1].kind);
           const ok = frame[1].kind !== state.failKind;
-          queueMicrotask(() =>
-            deliver(["OK", frame[1].id, ok, ok ? "" : "permission denied"]),
-          );
+          queueMicrotask(async () => {
+            if (state.beforeAck) await state.beforeAck(frame[1]);
+            await deliver([
+              "OK",
+              frame[1].id,
+              ok,
+              ok ? "" : "permission denied",
+            ]);
+          });
         }
         return;
       }
@@ -162,6 +186,7 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
       ["u", String(url)],
     );
     if (state.beforeFetch) await state.beforeFetch();
+    if (state.fetchError) return new Response("unavailable", { status: 503 });
     const status = new URL(url).searchParams.get("status");
     return new Response(
       JSON.stringify(
@@ -226,6 +251,8 @@ afterEach(async () => {
   }
   globalThis.fetch = originalFetch;
   relayClient.wsId = null;
+  localStorage.removeItem("buzz-feature-overrides-v1");
+  emitChange();
 });
 
 test("queue guards access, filters and refreshes a bounded list, and shows target as plain text", async () => {
@@ -367,6 +394,25 @@ test("fresh validation rejects resolved reports before enforcement", async () =>
   await click(view.container, "Ban member");
   assert.equal(view.state.sent.length, 0);
   assert.match(view.container.textContent, /no longer open/);
+  view.state.rows[0].status = "open";
+  await act(async () =>
+    fireEvent.change(
+      getByRole(view.container, "textbox", {
+        name: /Reporter-readable reason/,
+      }),
+      { target: { value: "Updated community rules" } },
+    ),
+  );
+  assert.equal(
+    getByRole(view.container, "textbox", { name: /Reporter-readable reason/ })
+      .value,
+    "Updated community rules",
+  );
+  await click(view.container, "Dismiss");
+  assert.deepEqual(
+    view.state.sent[0].tags.find((tag) => tag[0] === "reason"),
+    ["reason", "Updated community rules"],
+  );
 });
 
 test("identity changing while signing fences publication", async () => {
@@ -522,4 +568,248 @@ test("an observed identity switch permanently invalidates an older signed action
   await act(async () => release());
   await settle();
   assert.equal(view.state.sent.length, 0);
+});
+
+async function leaveAndReopen(view, destination = "reports") {
+  if (destination === "settings") {
+    await act(async () =>
+      view.root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: view.qc },
+          React.createElement("p", {}, "Other settings"),
+        ),
+      ),
+    );
+    await act(async () =>
+      view.root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: view.qc },
+          renderSettingsSection("community-reports", {}),
+        ),
+      ),
+    );
+    await settle();
+  } else await click(view.container, "Back to reports");
+  await selectReport(view);
+}
+
+test("pending enforcement survives report and Settings navigation and prevents a second attempt", async () => {
+  for (const destination of ["reports", "settings"]) {
+    const view = await setup();
+    await selectReport(view);
+    await setReason(view.container);
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    view.state.beforeAck = (event) => (event.kind === 9040 ? gate : undefined);
+    try {
+      await click(view.container, "Ban member");
+      assert.deepEqual(
+        view.state.sent.map((event) => event.kind),
+        [9040],
+      );
+      await leaveAndReopen(view, destination);
+      assert.equal(
+        getByRole(view.container, "textbox", {
+          name: /Reporter-readable reason/,
+        }).value,
+        "Community rules",
+      );
+      assert.equal(
+        getByRole(view.container, "button", { name: "Ban member" }).disabled,
+        true,
+      );
+      await click(view.container, "Ban member");
+      assert.deepEqual(
+        view.state.sent.map((event) => event.kind),
+        [9040],
+      );
+      await act(async () => release());
+      await settle();
+      if (destination === "settings") {
+        assert.match(view.container.textContent, /Enforcement succeeded/);
+        await click(view.container, "Retry decision only");
+      }
+      assert.match(view.container.textContent, /Decision recorded/);
+      assert.deepEqual(
+        view.state.sent.map((event) => event.kind),
+        [9040, 9044],
+      );
+    } finally {
+      await act(async () => release());
+      await settle();
+      await act(async () => view.root.unmount());
+      view.container.remove();
+      view.qc.clear();
+      mounted = null;
+    }
+  }
+});
+
+test("uncertain enforcement remains locked after leaving and reopening reports or Settings", async () => {
+  const view = await setup();
+  await selectReport(view);
+  await setReason(view.container);
+  view.state.failNative = true;
+  await click(view.container, "Kick from channel");
+  for (const destination of ["reports", "settings"]) {
+    await leaveAndReopen(view, destination);
+    assert.match(view.container.textContent, /Enforcement is not confirmed/);
+    assert.equal(
+      queryByRole(view.container, "button", { name: "Kick from channel" }),
+      null,
+    );
+  }
+  assert.equal(view.state.native.length, 1);
+  assert.equal(view.state.sent.length, 0);
+});
+
+test("successful enforcement retains its captured decision-only recovery across report and Settings navigation", async () => {
+  const view = await setup();
+  await selectReport(view);
+  await setReason(view.container);
+  view.state.failKind = 9044;
+  await click(view.container, "Ban member");
+  for (const destination of ["reports", "settings"]) {
+    await leaveAndReopen(view, destination);
+    assert.match(view.container.textContent, /Enforcement succeeded/);
+    assert.equal(
+      queryByRole(view.container, "button", { name: "Ban member" }),
+      null,
+    );
+    assert.equal(
+      getByRole(view.container, "textbox", { name: /Reporter-readable reason/ })
+        .value,
+      "Community rules",
+    );
+    assert.ok(
+      getByRole(view.container, "button", { name: "Retry decision only" }),
+    );
+  }
+  view.state.failKind = null;
+  await click(view.container, "Retry decision only");
+  assert.deepEqual(
+    view.state.sent.map((event) => event.kind),
+    [9040, 9044, 9044],
+  );
+  assert.match(view.container.textContent, /Decision recorded/);
+});
+
+test("a delayed decision on report A cannot change report B or its human controls", async () => {
+  const view = await setup({
+    rows: [
+      rawReport(),
+      rawReport({
+        id: "db-b",
+        report_event_id: "78".repeat(32),
+        target_kind: "pubkey",
+        target: author,
+      }),
+    ],
+  });
+  await click(view.container, "spam report db-uuid, open");
+  await setReason(view.container);
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  view.state.beforeAck = (event) => (event.kind === 9044 ? gate : undefined);
+  await click(view.container, "Dismiss");
+  await click(view.container, "Back to reports");
+  await click(view.container, "spam report db-b, open");
+  await setReason(view.container);
+  await act(async () => release());
+  await settle();
+  assert.match(
+    getByRole(view.container, "article", { name: "Report details" })
+      .textContent,
+    /Status: open/,
+  );
+  assert.equal(
+    getByRole(view.container, "button", { name: "Dismiss", exact: true })
+      .disabled,
+    false,
+  );
+  assert.doesNotMatch(view.container.textContent, /Decision recorded/);
+  assert.deepEqual(
+    view.state.sent.map(
+      (event) => event.tags.find((tag) => tag[0] === "report")?.[1],
+    ),
+    [reportId],
+  );
+});
+
+test("observed report closure, removal or failed queue refresh clears advice and blocks stale human controls", async () => {
+  for (const change of ["resolved", "removed", "error"]) {
+    localStorage.setItem(
+      "buzz-feature-overrides-v1",
+      JSON.stringify({ "moderation-judge": true }),
+    );
+    emitChange();
+    const view = await setup();
+    await selectReport(view);
+    await act(async () =>
+      fireEvent.change(
+        getByRole(view.container, "combobox", { name: "Review policy" }),
+        { target: { value: "builtin_v1" } },
+      ),
+    );
+    await act(async () =>
+      fireEvent.change(
+        getByRole(view.container, "combobox", { name: "Local model" }),
+        { target: { value: "fixture-local-model" } },
+      ),
+    );
+    let release;
+    if (change === "removed") {
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      view.state.beforeJudge = () => gate;
+    }
+    await click(view.container, "Review with AI");
+    if (change !== "removed")
+      assert.ok(getByRole(view.container, "region", { name: "AI assessment" }));
+    if (change === "resolved") view.state.rows[0].status = "resolved";
+    if (change === "removed") view.state.rows = [];
+    if (change === "error") view.state.fetchError = true;
+    await act(async () =>
+      view.qc.refetchQueries({ queryKey: ["communityReports"] }),
+    );
+    await settle();
+    if (release) {
+      await act(async () => release());
+      await settle();
+    }
+    assert.equal(
+      !!queryByRole(view.container, "region", { name: "AI assessment" }),
+      false,
+      change,
+    );
+    assert.equal(
+      getByRole(view.container, "button", { name: "Review with AI" }).disabled,
+      true,
+      change,
+    );
+    await setReason(view.container);
+    const dismiss = queryByRole(view.container, "button", {
+      name: "Dismiss",
+      exact: true,
+    });
+    assert.ok(!dismiss || dismiss.disabled, change);
+    assert.equal(view.state.sent.length, 0);
+    if (change === "removed")
+      assert.ok(
+        view.state.judgeCalls.some(
+          (call) => call.cmd === "cancel_moderation_review",
+        ),
+      );
+    await act(async () => view.root.unmount());
+    view.container.remove();
+    view.qc.clear();
+    mounted = null;
+  }
 });
