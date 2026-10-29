@@ -17,6 +17,7 @@ type Props = {
   source: RelayEvent | null;
   attempt: ReportActionAttempt | null;
   available: boolean;
+  enforcementAvailable?: boolean;
   onSubmit: (decision: ReportDecision, decisionOnly?: boolean) => Promise<void>;
   onReviewBlockedChange?: (blocked: boolean) => void;
 };
@@ -26,6 +27,7 @@ export function CommunityReportActions({
   source,
   attempt,
   available,
+  enforcementAvailable = true,
   onSubmit,
   onReviewBlockedChange,
 }: Props) {
@@ -35,8 +37,10 @@ export function CommunityReportActions({
   const [minutes, setMinutes] = useState(60);
   const busy = !!attempt?.pending;
   const result = attempt?.result;
-  const hasAuthor = report.targetKind === "pubkey" || !!source;
+  const hasAuthor =
+    enforcementAvailable && (report.targetKind === "pubkey" || !!source);
   const canUseChannel =
+    enforcementAvailable &&
     report.targetKind === "event" &&
     !!source &&
     !!report.channelId &&
@@ -87,8 +91,8 @@ export function CommunityReportActions({
       </p>
       {!available ? (
         <p role="status">
-          The report could not be confirmed as open in this queue. Return to
-          reports and refresh before another decision.
+          The report or target could not be confirmed as current. Refresh the
+          target for inspection, or return to reports and refresh the queue.
         </p>
       ) : null}
       {!locked && report.status === "open" ? (

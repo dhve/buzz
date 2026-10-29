@@ -5,7 +5,12 @@ import { afterEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, getByRole, queryByRole } from "@testing-library/react";
+import {
+  fireEvent,
+  getByRole,
+  queryByRole,
+  waitFor,
+} from "@testing-library/react";
 import { renderSettingsSection } from "@/features/settings/ui/SettingsPanels.tsx";
 import { relayClient } from "@/shared/api/relayClient";
 import { emitChange } from "@/shared/features/useFeatureEnabled";
@@ -60,6 +65,10 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
     beforeAck: null,
     role,
     targetVisible: true,
+    edits: [],
+    visibility: "open",
+    subscriptions: new Map(),
+    targetReads: [],
     targetEvent: structuredClone(canonical),
     operations: [],
     judgeCalls: [],
@@ -97,12 +106,13 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
           throw new Error("Membership lookup unavailable");
         return true;
       }
-      if (cmd === "get_channel_details")
+      if (cmd === "get_channel_details") {
+        if (state.channelError) throw state.channelError;
         return {
           id: channelId,
           name: "general",
           channel_type: "stream",
-          visibility: "open",
+          visibility: state.visibility,
           description: "",
           topic: null,
           purpose: null,
@@ -126,6 +136,7 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
           max_members: null,
           nip29_group_id: null,
         };
+      }
       if (cmd === "sign_event") {
         state.signed.push(args);
         if (state.beforeSign) await state.beforeSign(args);
@@ -140,16 +151,26 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
       if (cmd === "plugin:websocket|send") {
         const frame = JSON.parse(args.message.data);
         if (frame[0] === "REQ") {
-          const event = frame[2].kinds?.includes(13534)
-            ? { ...canonical, kind: 13534, tags: [["member", me, state.role]] }
-            : state.targetVisible
-              ? state.targetEvent
-              : null;
+          state.subscriptions.set(frame[1], frame[2]);
+          if (frame[2].ids?.includes(target))
+            state.targetReads.push(state.relay);
+          const event = frame[2].kinds?.includes(40003)
+            ? (state.edits[0] ?? null)
+            : frame[2].kinds?.includes(13534)
+              ? {
+                  ...canonical,
+                  kind: 13534,
+                  tags: [["member", me, state.role]],
+                }
+              : state.targetVisible
+                ? state.targetEvent
+                : null;
           queueMicrotask(async () => {
             if (event) await deliver(["EVENT", frame[1], event]);
             await deliver(["EOSE", frame[1]]);
           });
         }
+        if (frame[0] === "CLOSE") state.subscriptions.delete(frame[1]);
         if (frame[0] === "EVENT") {
           state.sent.push(frame[1]);
           state.operations.push(frame[1].kind);
@@ -218,7 +239,7 @@ async function setup({ role = "owner", rows = [rawReport()] } = {}) {
   );
   mounted = { root, container, qc };
   await settle();
-  return { ...mounted, state };
+  return { ...mounted, state, deliver };
 }
 async function settle() {
   await act(async () => {
@@ -233,6 +254,18 @@ async function click(container, name) {
 }
 async function selectReport(view) {
   await click(view.container, /spam report/);
+  if (view.state.rows[0]?.target_kind === "event") {
+    await waitFor(() =>
+      assert.equal(
+        [...view.state.subscriptions].filter(
+          ([id, filter]) =>
+            id.startsWith("live-") && filter["#e"]?.includes(target),
+        ).length,
+        1,
+      ),
+    );
+    await settle();
+  }
 }
 async function setReason(container) {
   await act(async () =>
@@ -468,6 +501,9 @@ test("target author is read again before enforcement; inaccessible targets canno
   await selectReport(view);
   await setReason(view.container);
   view.state.targetEvent.pubkey = "56".repeat(32);
+  await click(view.container, "Ban member");
+  assert.equal(view.state.sent.length, 0);
+  await click(view.container, "Refresh target for inspection");
   await click(view.container, "Ban member");
   assert.deepEqual(view.state.sent[0].tags[0], ["p", "56".repeat(32)]);
 });
@@ -812,4 +848,327 @@ test("observed report closure, removal or failed queue refresh clears advice and
     view.qc.clear();
     mounted = null;
   }
+});
+
+// Removing the preflight snapshot comparison lets stale human choices sign.
+for (const change of ["content", "deleted", "edit", "privacy"]) {
+  test(`human decisions require fresh inspection after ${change}`, async () => {
+    const view = await setup();
+    await selectReport(view);
+    await setReason(view.container);
+    if (change === "content")
+      view.state.targetEvent.content = "Updated message";
+    if (change === "deleted") view.state.targetVisible = false;
+    if (change === "edit")
+      view.state.edits = [
+        {
+          ...canonical,
+          id: "aa".repeat(32),
+          kind: 40003,
+          content: "Edited message",
+          tags: [
+            ["e", target],
+            ["h", channelId],
+          ],
+        },
+      ];
+    if (change === "privacy") view.state.visibility = "private";
+    await click(view.container, "Dismiss");
+    assert.equal(view.state.sent.length, 0, "stale decisions must not publish");
+    assert.match(view.container.textContent, /inspect|changed/i);
+    await click(view.container, "Refresh target for inspection");
+    await click(view.container, "Dismiss");
+    assert.deepEqual(
+      view.state.sent.map((event) => event.kind),
+      [9044],
+    );
+  });
+}
+
+async function requestAdvice(view) {
+  await act(async () =>
+    fireEvent.change(
+      getByRole(view.container, "combobox", { name: "Review policy" }),
+      { target: { value: "builtin_v1" } },
+    ),
+  );
+  await act(async () =>
+    fireEvent.change(
+      getByRole(view.container, "combobox", { name: "Local model" }),
+      { target: { value: "fixture-local-model" } },
+    ),
+  );
+  await click(view.container, "Review with AI");
+}
+
+// Deliver via the real RelayClient subscription, never by rerendering source props.
+for (const kind of [40003, 5, 9005]) {
+  test(`observed kind ${kind} clears advice through the relay and requires inspection`, async () => {
+    localStorage.setItem(
+      "buzz-feature-overrides-v1",
+      JSON.stringify({ "moderation-judge": true }),
+    );
+    emitChange();
+    const view = await setup();
+    await selectReport(view);
+    await waitFor(() =>
+      assert.equal(
+        [...view.state.subscriptions].filter(
+          ([id, filter]) =>
+            id.startsWith("live-") && filter["#e"]?.includes(target),
+        ).length,
+        1,
+      ),
+    );
+    let release;
+    if (kind === 5)
+      view.state.beforeJudge = () =>
+        new Promise((resolve) => {
+          release = resolve;
+        });
+    await requestAdvice(view);
+    if (kind !== 5)
+      assert.ok(getByRole(view.container, "region", { name: "AI assessment" }));
+    const changed = {
+      ...canonical,
+      id: kind.toString(16).padStart(64, "0"),
+      kind,
+      content: "Changed message",
+      tags: [
+        ["e", target],
+        ["h", channelId],
+      ],
+    };
+    if (kind === 40003) view.state.edits = [changed];
+    else view.state.targetVisible = false;
+    const subscriptions = [...view.state.subscriptions].filter(
+      ([id, filter]) =>
+        id.startsWith("live-") &&
+        filter["#e"]?.includes(target) &&
+        filter.kinds?.includes(kind),
+    );
+    assert.equal(
+      subscriptions.length,
+      1,
+      JSON.stringify([...view.state.subscriptions]),
+    );
+    await act(async () => {
+      for (const [id] of subscriptions)
+        await view.deliver(["EVENT", id, changed]);
+    });
+    await settle();
+    if (release) {
+      await act(async () => release());
+      await settle();
+    }
+    assert.equal(
+      !!queryByRole(view.container, "region", { name: "AI assessment" }),
+      false,
+    );
+    assert.equal(
+      getByRole(view.container, "button", { name: "Review with AI" }).disabled,
+      true,
+    );
+    if (kind === 5)
+      assert.ok(
+        view.state.judgeCalls.some(
+          (call) => call.cmd === "cancel_moderation_review",
+        ),
+      );
+    await setReason(view.container);
+    assert.equal(
+      getByRole(view.container, "button", { name: "Dismiss", exact: true })
+        .disabled,
+      true,
+    );
+    await click(view.container, "Refresh target for inspection");
+    await click(view.container, "Dismiss");
+    assert.deepEqual(
+      view.state.sent.map((event) => event.kind),
+      [9044],
+    );
+  });
+}
+
+test("deleted target recovery refreshes inspection and retries only the captured decision", async () => {
+  const view = await setup();
+  await selectReport(view);
+  await setReason(view.container);
+  view.state.failKind = 9044;
+  await click(view.container, "Delete message");
+  view.state.targetVisible = false;
+  view.state.failKind = null;
+  await click(view.container, "Retry decision only");
+  assert.equal(view.state.native.length, 1);
+  assert.deepEqual(
+    view.state.sent.map((event) => event.kind),
+    [9044],
+  );
+  await click(view.container, "Refresh target for inspection");
+  await click(view.container, "Retry decision only");
+  assert.equal(view.state.native.length, 1);
+  assert.deepEqual(
+    view.state.sent.map((event) => event.kind),
+    [9044, 9044],
+  );
+  assert.match(view.container.textContent, /Decision recorded/);
+});
+
+test("identical report and source IDs in a different community cannot reuse advice or inspection", async () => {
+  localStorage.setItem(
+    "buzz-feature-overrides-v1",
+    JSON.stringify({ "moderation-judge": true }),
+  );
+  emitChange();
+  const view = await setup();
+  await selectReport(view);
+  await requestAdvice(view);
+  assert.ok(getByRole(view.container, "region", { name: "AI assessment" }));
+  await act(async () => {
+    view.state.relay = "wss://other.example";
+    view.qc.setQueryData(["communityModerationRelay", me], view.state.relay);
+  });
+  await settle();
+  assert.equal(
+    !!queryByRole(view.container, "region", { name: "AI assessment" }),
+    false,
+  );
+  assert.ok(view.state.targetReads.includes("wss://other.example"));
+  await requestAdvice(view);
+  const calls = view.state.judgeCalls.filter(
+    (call) => call.cmd === "review_moderation_report",
+  );
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    calls.map((call) => call.args.request.expectedRelayUrl),
+    ["wss://community.example", "wss://other.example"],
+  );
+  assert.ok(
+    calls.every((call) => call.args.request.reportEventId === reportId),
+  );
+});
+
+test("an observed edit while a human decision is signing fences publication", async () => {
+  const view = await setup();
+  await selectReport(view);
+  await waitFor(() =>
+    assert.equal(
+      [...view.state.subscriptions].filter(
+        ([id, filter]) =>
+          id.startsWith("live-") && filter["#e"]?.includes(target),
+      ).length,
+      1,
+    ),
+  );
+  await setReason(view.container);
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  view.state.beforeSign = (args) => (args.kind === 9044 ? gate : undefined);
+  await click(view.container, "Dismiss");
+  const edit = {
+    ...canonical,
+    id: "cc".repeat(32),
+    kind: 40003,
+    content: "New message",
+    tags: [["e", target]],
+  };
+  view.state.edits = [edit];
+  await act(async () => {
+    for (const [id, filter] of view.state.subscriptions)
+      if (id.startsWith("live-") && filter["#e"]?.includes(target))
+        await view.deliver(["EVENT", id, edit]);
+  });
+  await settle();
+  await act(async () => release());
+  await settle();
+  assert.equal(view.state.sent.length, 0);
+  assert.match(view.container.textContent, /changed|inspection/i);
+});
+
+for (const label of ["Dismiss", "Escalate"]) {
+  test(`unavailable channel retains authorized ${label.toLowerCase()} after inspection`, async () => {
+    const view = await setup();
+    view.state.targetVisible = false;
+    view.state.channelError = "channel not found";
+    await selectReport(view);
+    await click(view.container, "Refresh target for inspection");
+    await setReason(view.container);
+    assert.equal(
+      getByRole(view.container, "button", { name: label, exact: true })
+        .disabled,
+      false,
+    );
+    assert.equal(
+      !!queryByRole(view.container, "button", { name: "Ban member" }),
+      false,
+    );
+    await click(view.container, label);
+    assert.deepEqual(
+      view.state.sent.map((event) => event.kind),
+      [9044],
+    );
+    assert.match(view.container.textContent, /Decision recorded/);
+  });
+}
+
+test("channel network failures cannot masquerade as an unavailable inspection", async () => {
+  const view = await setup();
+  view.state.channelError = new Error("relay read timed out");
+  await selectReport(view);
+  await click(view.container, "Refresh target for inspection");
+  assert.equal(
+    getByRole(view.container, "button", { name: "Dismiss", exact: true })
+      .disabled,
+    true,
+  );
+  assert.equal(view.state.sent.length, 0);
+});
+
+test("unavailable channel preserves captured decision recovery without repeating enforcement", async () => {
+  const view = await setup();
+  await selectReport(view);
+  await setReason(view.container);
+  view.state.failKind = 9044;
+  await click(view.container, "Delete message");
+  view.state.targetVisible = false;
+  view.state.channelError = "channel not found";
+  view.state.failKind = null;
+  await click(view.container, "Refresh target for inspection");
+  assert.equal(
+    getByRole(view.container, "button", { name: "Retry decision only" })
+      .disabled,
+    false,
+  );
+  await click(view.container, "Retry decision only");
+  assert.equal(view.state.native.length, 1);
+  assert.deepEqual(
+    view.state.sent.map((event) => event.kind),
+    [9044, 9044],
+  );
+  assert.match(view.container.textContent, /Decision recorded/);
+});
+
+test("leaving a report retires its target observation through the relay", async () => {
+  const view = await setup();
+  await selectReport(view);
+  await click(view.container, "Back to reports");
+  await waitFor(() =>
+    assert.equal(
+      [...view.state.subscriptions].filter(
+        ([id, filter]) =>
+          id.startsWith("live-") && filter["#e"]?.includes(target),
+      ).length,
+      0,
+    ),
+  );
+  await selectReport(view);
+  assert.equal(
+    [...view.state.subscriptions].filter(
+      ([id, filter]) =>
+        id.startsWith("live-") && filter["#e"]?.includes(target),
+    ).length,
+    1,
+  );
 });

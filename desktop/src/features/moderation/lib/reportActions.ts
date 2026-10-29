@@ -14,24 +14,12 @@ import {
   canManageCommunityMembers,
   getMyRelayMembershipLookup,
 } from "@/shared/api/relayMembers";
-import { relayClient } from "@/shared/api/relayClient";
 import { deleteMessage, removeChannelMember } from "@/shared/api/tauri";
-import type { RelayEvent } from "@/shared/api/types";
-
-export async function readReportTarget(
-  report: ModerationReport,
-  scope: ModerationScope,
-): Promise<RelayEvent | null> {
-  if (report.targetKind !== "event") return null;
-  await assertModerationScope(scope);
-  const events = await relayClient.fetchEvents({
-    ids: [report.target],
-    kinds: [9, 40002, 40008, 45001, 45003],
-    limit: 1,
-  });
-  await assertModerationScope(scope);
-  return events.find((event) => event.id === report.target) ?? null;
-}
+import {
+  readReportInspection,
+  reportInspectionKey,
+  type ReportInspection,
+} from "./reportInspection";
 
 export type ReportDecision = {
   action: ResolutionAction;
@@ -81,6 +69,8 @@ export async function applyReportDecision(
   decision: ReportDecision,
   scope: ModerationScope,
   decisionOnly = false,
+  inspection?: ReportInspection,
+  inspectionIsCurrent: () => boolean = () => true,
 ): Promise<ReportActionResult> {
   let stage: "validation" | "enforcement" | "decision" = "validation";
   let enforced =
@@ -89,9 +79,28 @@ export async function applyReportDecision(
     const fresh = await revalidate(report, scope);
     if (!decision.reason.trim())
       throw new Error("Enter a reporter-readable reason.");
+    const currentInspection = await readReportInspection(fresh, scope);
+    if (
+      !inspection ||
+      !inspectionIsCurrent() ||
+      reportInspectionKey(currentInspection) !== reportInspectionKey(inspection)
+    )
+      throw new Error(
+        "The target or channel changed. Refresh target for inspection before deciding.",
+      );
+    // Keep the observed-source fence through asynchronous signing/publication.
+    // Once enforcement succeeds its captured decision must remain recoverable.
+    const writeScope = {
+      ...scope,
+      isCurrent: () => scope.isCurrent() && inspectionIsCurrent(),
+    };
     const enforcement = !["dismiss", "escalate"].includes(decision.action);
     if (!decisionOnly && enforcement) {
-      const event = await readReportTarget(fresh, scope);
+      if (fresh.channelId && !currentInspection.channel)
+        throw new Error(
+          "A readable target channel is required for new enforcement.",
+        );
+      const event = currentInspection.source;
       const pubkey =
         fresh.targetKind === "pubkey" ? fresh.target : event?.pubkey;
       if (
@@ -120,23 +129,23 @@ export async function applyReportDecision(
         throw new Error("Choose a future timeout expiry.");
       const channelId = fresh.channelId ?? "";
       const expiresAt = decision.expiresAt ?? 0;
-      await assertModerationScope(scope);
+      await assertModerationScope(writeScope);
       stage = "enforcement";
       switch (decision.action) {
         case "ban":
-          await banMember({ pubkey, reason: decision.reason }, scope);
+          await banMember({ pubkey, reason: decision.reason }, writeScope);
           break;
         case "timeout":
           await timeoutMember(
             { pubkey, reason: decision.reason, expiresAt },
-            scope,
+            writeScope,
           );
           break;
         case "delete":
-          await deleteMessage(channelId, fresh.target, scope);
+          await deleteMessage(channelId, fresh.target, writeScope);
           break;
         case "kick":
-          await removeChannelMember(channelId, pubkey, scope);
+          await removeChannelMember(channelId, pubkey, writeScope);
           break;
       }
       enforced = true;
@@ -149,7 +158,7 @@ export async function applyReportDecision(
         status: decision.action === "dismiss" ? "dismissed" : "resolved",
         reason: decision.reason,
       },
-      scope,
+      enforced && !decisionOnly ? scope : writeScope,
     );
     return { stage: "complete" };
   } catch (error) {

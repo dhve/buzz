@@ -11,6 +11,8 @@ import {
   type ReportDecision,
 } from "./lib/reportActions";
 
+import type { ReportInspection } from "./lib/reportInspection";
+
 export type ReportActionAttempt = {
   token: string;
   decision: ReportDecision;
@@ -50,6 +52,8 @@ export function useReportActionAttempt(
   scope: ModerationScope | undefined,
   onInvalidate: () => void,
   onComplete: (reportEventId: string, action: ResolutionAction) => void,
+  inspection?: ReportInspection,
+  inspectionIsCurrent?: () => boolean,
 ) {
   const queryClient = useQueryClient();
   const queryKey = [
@@ -103,6 +107,8 @@ export function useReportActionAttempt(
       captured,
       scope,
       decisionOnly,
+      inspection,
+      inspectionIsCurrent,
     );
     if (
       queryClient.getQueryData<ReportActionAttempt>(queryKey)?.token !== token

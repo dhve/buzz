@@ -17,6 +17,14 @@ refresh up to 500 reports, inspect the canonical target, and enter a
 reporter-visible reason. Community moderation does not grant access to the
 deployment staff console or bypass private-channel read permissions.
 
+Before each action or decision retry, the app rechecks authority, the open
+report, its target, channel and edits against the inspected state. A change
+requires **Refresh target for inspection** before proceeding. Observed source
+edits or deletions clear advice and cancel pending review; unobserved remote
+changes are checked again before the action. A missing or inaccessible channel
+still permits authorized dismissal, escalation and captured decision recovery,
+but does not permit new enforcement. Other read failures block the action.
+
 Dismiss and escalate record a decision. Delete, kick, ban and timeout first
 perform the selected enforcement and then record the report decision. Kind
 `9044` records a decision; it does not enforce a penalty. If enforcement
@@ -137,7 +145,13 @@ ordinary member. Keep this PR draft until a human completes the relevant steps.
    completion. Verify AI gives an unavailable/error state without a verdict or
    moderation write. Confirm illegal-report handling still follows the existing
    human and escalation workflow.
-7. Use keyboard navigation and screen-reader labels for the queue, policy/model
+7. Edit or delete the selected source from another client. When the change is
+   observed, verify advice clears and pending review is cancelled. Attempt an
+   action before refreshing; verify it requires fresh inspection and writes
+   nothing. Refresh and inspect the changed target. For an inaccessible channel,
+   verify authorized dismissal and escalation remain available, and a captured
+   decision retry records only the decision without repeating enforcement.
+8. Use keyboard navigation and screen-reader labels for the queue, policy/model
    controls, cancel/retry controls and human decision reason.
 
 For repeatable synthetic evaluation and the opt-in native runtime exercise, see

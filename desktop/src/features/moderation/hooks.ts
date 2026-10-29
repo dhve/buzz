@@ -2,7 +2,7 @@ import {
   assertModerationScope,
   type ModerationScope,
 } from "@/shared/api/moderationScope";
-import { getChannelDetails } from "@/shared/api/tauri";
+import { readReportChannel } from "./lib/reportInspection";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
@@ -169,7 +169,7 @@ export function useModerationReportChannelQuery(
     queryFn: async () => {
       if (!scope || !channelId) throw new Error("No report channel selected.");
       await assertModerationScope(scope);
-      const channel = await getChannelDetails(channelId);
+      const channel = await readReportChannel(channelId);
       await assertModerationScope(scope);
       return channel;
     },

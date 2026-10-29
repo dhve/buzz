@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { canManageCommunityMembers } from "@/shared/api/relayMembers";
 import type { ModerationReport } from "@/shared/api/moderation";
-import type { RelayEvent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   useCommunityReportsQuery,
   useModerationReportChannelQuery,
 } from "../hooks";
-import { readReportTarget } from "../lib/reportActions";
+import { channelInspectionKey } from "../lib/reportInspection";
+import { useReportInspection } from "../useReportInspection";
 import { useCommunityModerationScope } from "../useCommunityModerationScope";
 import {
   isReportAttemptLocked,
@@ -41,14 +41,21 @@ export function CommunityReportsPanel() {
     selected?.channelId ?? null,
     allowed && !!selected,
   );
-  const [source, setSource] = useState<RelayEvent | null>(null);
-  const [sourceError, setSourceError] = useState<string | null>(null);
-  const [sourceLoading, setSourceLoading] = useState(false);
+  const target = useReportInspection(selected, scope, allowed);
+  const source = target.data?.source ?? null;
+  const sourceError = target.error;
+  const sourceLoading = target.isFetching;
+  const inspectionReady =
+    target.ready &&
+    (!selected?.channelId ||
+      (channel.isSuccess &&
+        !channel.isFetching &&
+        channelInspectionKey(channel.data) ===
+          channelInspectionKey(target.inspection?.channel)));
   const [reviewGeneration, setReviewGeneration] = useState(0);
   const [humanReviewSignal, setHumanReviewBlocked] = useState(false);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
-  const selectionGeneration = useRef(0);
   const invalidateReview = useCallback(
     () => setReviewGeneration((generation) => generation + 1),
     [],
@@ -70,39 +77,14 @@ export function CommunityReportsPanel() {
           : previous,
       );
     },
+    inspectionReady ? target.inspection : undefined,
+    target.inspectionIsCurrent,
   );
   const humanReviewBlocked =
     humanReviewSignal ||
     !!attempt?.pending ||
     isReportAttemptLocked(attempt) ||
     !selectedReportAvailable;
-
-  useEffect(() => {
-    const generation = ++selectionGeneration.current;
-    setSource(null);
-    setSourceError(null);
-    invalidateReview();
-    if (!selected || !scope || !allowed) return;
-    setSourceLoading(selected.targetKind === "event");
-    void readReportTarget(selected, scope)
-      .then((event) => {
-        if (generation === selectionGeneration.current && scope.isCurrent())
-          setSource(event);
-      })
-      .catch((error) => {
-        if (generation === selectionGeneration.current && scope.isCurrent())
-          setSourceError(
-            error instanceof Error ? error.message : String(error),
-          );
-      })
-      .finally(() => {
-        if (generation === selectionGeneration.current && scope.isCurrent())
-          setSourceLoading(false);
-      });
-    return () => {
-      selectionGeneration.current++;
-    };
-  }, [selected, scope, allowed, invalidateReview]);
 
   const refresh = async () => {
     invalidateReview();
@@ -119,7 +101,7 @@ export function CommunityReportsPanel() {
   const observedOpenChannelEligible =
     channel.isSuccess &&
     !channel.isFetching &&
-    channel.data.visibility === "open" &&
+    channel.data?.visibility === "open" &&
     ["stream", "forum"].includes(channel.data.channelType) &&
     !channel.data.archivedAt;
   const reviewContextKey = JSON.stringify([
@@ -128,6 +110,8 @@ export function CommunityReportsPanel() {
     membership.data,
     selected,
     source,
+    target.observedRevision,
+    inspectionReady,
     channel.data,
     channel.status,
     channel.fetchStatus,
@@ -203,6 +187,10 @@ export function CommunityReportsPanel() {
                   </p>
                   {channel.data ? (
                     <p>Channel visibility: {channel.data.visibility}</p>
+                  ) : channel.isSuccess ? (
+                    <p>
+                      Channel unavailable through ordinary community access.
+                    </p>
                   ) : channel.isError ? (
                     <p role="status">Channel privacy could not be checked.</p>
                   ) : null}
@@ -214,7 +202,9 @@ export function CommunityReportsPanel() {
                   {sourceLoading ? (
                     <p role="status">Loading target…</p>
                   ) : sourceError ? (
-                    <p role="alert">Target could not be read: {sourceError}</p>
+                    <p role="alert">
+                      Target could not be read: {String(sourceError)}
+                    </p>
                   ) : source ? (
                     <>
                       <p>Author: {source.pubkey}</p>
@@ -228,6 +218,26 @@ export function CommunityReportsPanel() {
                       Author actions are unavailable.
                     </p>
                   ) : null}
+                  {target.data?.edits.map((edit) => (
+                    <div key={edit.id} className="whitespace-pre-wrap">
+                      <p>Message edit:</p>
+                      <p>{edit.content}</p>
+                    </div>
+                  ))}
+                  {!inspectionReady && !sourceLoading ? (
+                    <p role="status">
+                      Target context needs fresh inspection before a decision.
+                    </p>
+                  ) : null}
+                  <Button
+                    disabled={sourceLoading}
+                    onClick={() => {
+                      invalidateReview();
+                      void Promise.all([target.refresh(), channel.refetch()]);
+                    }}
+                  >
+                    Refresh target for inspection
+                  </Button>
                 </article>
                 {scope ? (
                   <ModerationJudgeReview
@@ -241,6 +251,8 @@ export function CommunityReportsPanel() {
                       !!source &&
                       !sourceLoading &&
                       !sourceError &&
+                      inspectionReady &&
+                      target.data?.edits.length === 0 &&
                       !humanReviewBlocked
                     }
                     ineligibleReason={
@@ -268,7 +280,10 @@ export function CommunityReportsPanel() {
                     report={selected}
                     source={source}
                     attempt={attempt}
-                    available={selectedReportAvailable}
+                    available={selectedReportAvailable && inspectionReady}
+                    enforcementAvailable={
+                      !selected.channelId || !!target.data?.channel
+                    }
                     onSubmit={submit}
                     onReviewBlockedChange={(blocked) => {
                       if (

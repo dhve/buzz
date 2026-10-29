@@ -222,3 +222,69 @@ test("navigation cancels a delayed review and never displays its completion", as
     panel.getByRole("heading", { name: "AI suggestion: no match" }),
   ).toHaveCount(0);
 });
+
+test("a live edit clears advice and requires fresh human inspection", async ({
+  page,
+}) => {
+  const panel = await start(page);
+  const judge = await selectPolicy(page);
+  await judge
+    .getByRole("button", { name: "Review with AI", exact: true })
+    .click();
+  await expect(
+    judge.getByRole("heading", { name: "AI suggestion: no match" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__?: (
+                kind: number,
+              ) => boolean;
+            }
+          ).__BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__?.(40003) ?? false,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate((target) => {
+    (
+      window as Window & {
+        __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+          channelName: string;
+          content: string;
+          kind: number;
+          extraTags: string[][];
+        }) => unknown;
+      }
+    ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "Updated target for human inspection",
+      kind: 40003,
+      extraTags: [["e", target]],
+    });
+  }, report.target);
+  await expect(
+    judge.getByRole("heading", { name: "AI suggestion: no match" }),
+  ).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: "Dismiss", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    panel.getByText("Updated target for human inspection", { exact: true }),
+  ).toBeVisible();
+  await panel
+    .getByRole("button", { name: "Refresh target for inspection" })
+    .click();
+  await panel
+    .getByLabel("Reporter-readable reason (required)")
+    .fill("I inspected the updated message");
+  await expect(
+    panel.getByRole("button", { name: "Dismiss", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    judge.getByRole("button", { name: "Review with AI", exact: true }),
+  ).toBeDisabled();
+  expect(await requests(page)).toHaveLength(1);
+});
