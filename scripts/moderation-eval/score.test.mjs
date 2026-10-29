@@ -253,3 +253,79 @@ test("severe recall is exposed separately for each rule", () => {
   assert.equal(result.perRule.G2_ABUSE.severeRecall.denominator, 1);
   assert.equal(result.perRule.G2_ABUSE.recall.value, 0.5);
 });
+
+test("duplicate fields and malformed Unicode never inflate schema validity", () => {
+  const invalid = [
+    '{"verdict":"needs_review","verdict":"no_match","matches":[],"uncertainty":null}',
+    '{"verdict":"no_match","\\u0076erdict":"no_match","matches":[],"uncertainty":null}',
+    '{"verdict":"needs_review","matches":[{"rule_id":"G2_ABUSE","evidence":"invented","evidence":"synthetic","reason":"test"}],"uncertainty":null}',
+    '{"verdict":"needs_review","matches":[{"rule_id":"G2_ABUSE","evidence":"synthetic","reason":"first","reason":"second"}],"uncertainty":null}',
+    '{"verdict":"uncertain","matches":[],"uncertainty":"\\ud800"}',
+    '{"verdict":"uncertain","matches":[],"uncertainty":"\\udfff"}',
+    '{"verdict":"uncertain","matches":[],"uncertainty":"\\ud800x\\udc00"}',
+    JSON.stringify({
+      verdict: "needs_review",
+      matches: [
+        { rule_id: "G2_ABUSE", evidence: "synthetic", reason: "\ud800" },
+      ],
+      uncertainty: null,
+    }),
+  ];
+  const cases = invalid.map((raw, index) => ({
+    row: example(`strict-${index}`),
+    prediction: output(`strict-${index}`, [], { raw }),
+  }));
+  for (const { prediction } of cases)
+    assert.equal(validateCompletion(prediction.raw, "synthetic message"), null);
+  const report = score(
+    cases.map((c) => c.row),
+    cases.map((c) => c.prediction),
+  );
+  assert.equal(report.schemaFailureRate.numerator, 8);
+  assert.equal(report.schemaValidRate.numerator, 0);
+});
+
+test("timeouts have their own numerator, all-case denominator, interval and groups", () => {
+  const rows = ["a", "b", "c", "d", "e"].map((id) => example(id));
+  const result = score(rows, [
+    { id: "a", status: "error", code: "timeout", elapsedMs: 20 },
+    {
+      id: "b",
+      status: "error",
+      code: "driver_timeout",
+      elapsedMs: 30,
+      terminationConfirmed: false,
+    },
+    { id: "c", status: "error", code: "unavailable", elapsedMs: 10 },
+    output("d"),
+  ]);
+  assert.equal(result.counts.timeout, 2);
+  assert.equal(result.timeoutRate.numerator, 2);
+  assert.equal(result.timeoutRate.denominator, 5);
+  assert.equal(result.timeoutRate.value, 0.4);
+  assert.deepEqual(
+    result.timeoutRate.wilson95.map((n) => Math.round(n * 1000)),
+    [118, 769],
+  );
+  assert.equal(result.errorRate.numerator, 3);
+  assert.equal(result.byLanguage.en.timeoutRate.value, 0.4);
+  assert.equal(result.byCategory.benign_near_match.timeoutRate.value, 0.4);
+});
+
+test("valid escaped Unicode and JSON-like string data remain accepted", () => {
+  const raw =
+    '{"ver\\u0064ict":"uncertain","matches":[],"uncertainty":"\\ud83d\\ude00 context is missing"}';
+  assert.equal(validateCompletion(raw, "synthetic").verdict, "uncertain");
+  const reason =
+    'Quoted JSON {"reason":"first","reason":"second"}, backslash \\ and quote " are data. 😀';
+  const response = {
+    verdict: "needs_review",
+    matches: [{ rule_id: "G2_ABUSE", evidence: "synthetic", reason }],
+    uncertainty: null,
+  };
+  assert.equal(
+    validateCompletion(JSON.stringify(response), "synthetic message").matches[0]
+      .reason,
+    reason,
+  );
+});

@@ -28,6 +28,9 @@ export async function runEvaluation(rows, command, { timeoutMs = 65000 } = {}) {
       input: JSON.stringify({ id: row.id, source: row.source, policy }),
       encoding: "utf8",
       timeout: timeoutMs,
+      // SIGTERM is catchable: spawnSync can otherwise wait indefinitely.
+      // Killing this driver still says nothing about a detached backend.
+      killSignal: "SIGKILL",
       maxBuffer: 65536,
       shell: false,
     });

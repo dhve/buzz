@@ -69,3 +69,42 @@ test("overflowing driver output also stops admission of more examples", async ()
   assert.equal(results[0].code, "driver_output_limit");
   assert.equal(results[0].terminationConfirmed, false);
 });
+
+test("a driver ignoring SIGTERM is killed within the timeout bound", async () => {
+  const { mkdtempSync, readFileSync, existsSync, rmSync } = await import(
+    "node:fs"
+  );
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "buzz-driver-kill-"));
+  const ready = join(root, "ready");
+  const terminated = join(root, "sigterm");
+  try {
+    const driver = `const fs=require('node:fs');process.on('SIGTERM',()=>fs.writeFileSync(${JSON.stringify(terminated)},'ignored'));fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));setTimeout(()=>process.exit(0),2000);`;
+    const results = await runEvaluation(
+      [...rows, { ...rows[0], id: "dev-two" }],
+      [process.execPath, "-e", driver],
+      { timeoutMs: 200 },
+    );
+    assert.ok(
+      existsSync(ready),
+      "driver registered its SIGTERM handler before the deadline",
+    );
+    assert.ok(
+      results[0].elapsedMs < 1000,
+      "runner must not wait for the SIGTERM-ignoring driver to exit itself",
+    );
+    assert.equal(results.length, 1);
+    assert.equal(results[0].code, "driver_timeout");
+    assert.equal(
+      results[0].terminationConfirmed,
+      false,
+      "detached backend termination is unproven",
+    );
+    assert.equal(existsSync(terminated), false);
+    const pid = Number(readFileSync(ready, "utf8"));
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

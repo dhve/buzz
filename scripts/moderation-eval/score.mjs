@@ -33,12 +33,41 @@ const sameLabels = (a, b) =>
   JSON.stringify([...(a?.ruleIds ?? [])].sort()) ===
     JSON.stringify([...(b?.ruleIds ?? [])].sort());
 
+// JSON.parse checks grammar but discards duplicate keys and permits lone
+// surrogates. Inspect the original tokens before accepting its parsed value.
+function nativeJsonTokens(raw) {
+  const stack = [];
+  for (let i = 0; i < raw.length; i++) {
+    const char = raw[i];
+    if (char === '"') {
+      const start = i++;
+      while (raw[i] !== '"') {
+        if (raw[i] === "\\") i++;
+        i++;
+      }
+      const text = JSON.parse(raw.slice(start, i + 1));
+      if (!text.isWellFormed()) return false;
+      const frame = stack.at(-1);
+      if (frame?.keys && frame.expectKey) {
+        if (frame.keys.has(text)) return false;
+        frame.keys.add(text);
+        frame.expectKey = false;
+      }
+    } else if (char === "{") stack.push({ keys: new Set(), expectKey: true });
+    else if (char === "[") stack.push({});
+    else if (char === "}" || char === "]") stack.pop();
+    else if (char === "," && stack.at(-1)?.keys) stack.at(-1).expectKey = true;
+  }
+  return true;
+}
+
 // Matches native result.rs. This scorer never repairs model output.
 export function validateCompletion(raw, source) {
   if (typeof raw !== "string" || Buffer.byteLength(raw) > 16384) return null;
   let value;
   try {
     value = JSON.parse(raw);
+    if (!nativeJsonTokens(raw)) return null;
   } catch {
     return null;
   }
@@ -167,6 +196,7 @@ function metrics(rows, results) {
     refusal: 0,
     schemaFailure: 0,
     error: 0,
+    timeout: 0,
     missing: 0,
   };
   const ruleCounts = Object.fromEntries(
@@ -193,8 +223,11 @@ function metrics(rows, results) {
     else if (result.status === "refusal") counters.refusal++;
     else if (result.status === "error" && result.code === "invalid_response")
       counters.schemaFailure++;
-    else if (result.status === "error") counters.error++;
-    else if (!parsed) counters.schemaFailure++;
+    else if (result.status === "error") {
+      counters.error++;
+      if (["timeout", "driver_timeout"].includes(result.code))
+        counters.timeout++;
+    } else if (!parsed) counters.schemaFailure++;
     else {
       counters.completion++;
       if (parsed.verdict === "uncertain") counters.uncertainty++;
@@ -254,6 +287,7 @@ function metrics(rows, results) {
     uncertaintyRate: rate(counters.uncertainty, rows.length),
     refusalRate: rate(counters.refusal, rows.length),
     errorRate: rate(counters.error, rows.length),
+    timeoutRate: rate(counters.timeout, rows.length),
     missingRate: rate(counters.missing, rows.length),
     latencyMs: distribution(latency),
     resources: {
