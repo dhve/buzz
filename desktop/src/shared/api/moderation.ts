@@ -18,6 +18,11 @@ import {
 // the tenant from the connection host, and a stray `h` is rejected as
 // channel-scoping a global-only command.
 
+import {
+  assertModerationScope,
+  type ModerationScope,
+} from "@/shared/api/moderationScope";
+
 const NIP98_KIND = 27235;
 
 /** NIP-56 report categories (report.rs `REPORT_TYPES`). */
@@ -94,9 +99,19 @@ async function publishModerationEvent(
   tags: string[][],
   timeoutMessage: string,
   errorMessage: string,
+  scope?: ModerationScope,
 ): Promise<void> {
+  await assertModerationScope(scope);
   const event = await signRelayEvent({ kind, content: "", tags });
-  await relayClient.publishEvent(event, timeoutMessage, errorMessage);
+  await assertModerationScope(scope);
+  if (scope && event.pubkey !== scope.signerPubkey)
+    throw new Error("Reviewer changed while signing.");
+  await relayClient.publishEvent(
+    event,
+    timeoutMessage,
+    errorMessage,
+    scope?.isCurrent,
+  );
 }
 
 /**
@@ -128,11 +143,14 @@ export async function submitReport(input: {
 }
 
 /** Ban a member (kind:9040). `expiresAt` unix-secs ⇒ temporary; omit ⇒ permanent. */
-export async function banMember(input: {
-  pubkey: string;
-  expiresAt?: number;
-  reason?: string;
-}): Promise<void> {
+export async function banMember(
+  input: {
+    pubkey: string;
+    expiresAt?: number;
+    reason?: string;
+  },
+  scope?: ModerationScope,
+): Promise<void> {
   const tags: string[][] = [["p", normalizePubkey(input.pubkey)]];
   if (input.expiresAt != null)
     tags.push(["expiration", String(input.expiresAt)]);
@@ -142,6 +160,7 @@ export async function banMember(input: {
     tags,
     "Timed out while banning the member.",
     "Failed to ban the member.",
+    scope,
   );
 }
 
@@ -156,11 +175,14 @@ export async function unbanMember(pubkey: string): Promise<void> {
 }
 
 /** Time out a member (kind:9042). `expiresAt` unix-secs is required by the relay. */
-export async function timeoutMember(input: {
-  pubkey: string;
-  expiresAt: number;
-  reason?: string;
-}): Promise<void> {
+export async function timeoutMember(
+  input: {
+    pubkey: string;
+    expiresAt: number;
+    reason?: string;
+  },
+  scope?: ModerationScope,
+): Promise<void> {
   const tags: string[][] = [
     ["p", normalizePubkey(input.pubkey)],
     ["expiration", String(input.expiresAt)],
@@ -171,6 +193,7 @@ export async function timeoutMember(input: {
     tags,
     "Timed out while applying the timeout.",
     "Failed to apply the timeout.",
+    scope,
   );
 }
 
@@ -190,12 +213,15 @@ export async function untimeoutMember(pubkey: string): Promise<void> {
  * is moderator-authored and reporter-readable — it lands in the public tombstone
  * and the reporter-notice DM.
  */
-export async function resolveReport(input: {
-  reportEventId: string;
-  status: ResolutionStatus;
-  action: ResolutionAction;
-  reason?: string;
-}): Promise<void> {
+export async function resolveReport(
+  input: {
+    reportEventId: string;
+    status: ResolutionStatus;
+    action: ResolutionAction;
+    reason?: string;
+  },
+  scope?: ModerationScope,
+): Promise<void> {
   const tags: string[][] = [
     ["report", normalizePubkey(input.reportEventId)],
     ["status", input.status],
@@ -207,6 +233,7 @@ export async function resolveReport(input: {
     tags,
     "Timed out while resolving the report.",
     "Failed to resolve the report.",
+    scope,
   );
 }
 
@@ -220,7 +247,11 @@ export async function resolveReport(input: {
  * *before* signing and this function never appends parameters afterward — the
  * signed `u` and the fetched URL are guaranteed identical.
  */
-async function nip98GetHeader(url: string): Promise<string> {
+async function nip98GetHeader(
+  url: string,
+  scope?: ModerationScope,
+): Promise<string> {
+  await assertModerationScope(scope);
   const authEvent = await signRelayEvent({
     kind: NIP98_KIND,
     content: "",
@@ -230,14 +261,26 @@ async function nip98GetHeader(url: string): Promise<string> {
       ["nonce", crypto.randomUUID()],
     ],
   });
+  await assertModerationScope(scope);
+  if (scope && authEvent.pubkey !== scope.signerPubkey)
+    throw new Error("Reviewer changed while signing.");
   // NIP-98 events carry empty content and ASCII-only tags, so btoa is safe here.
   return `Nostr ${btoa(JSON.stringify(authEvent))}`;
 }
 
-async function moderationGet<T>(pathWithQuery: string): Promise<T> {
-  const base = (await getRelayHttpUrl()).replace(/\/+$/, "");
+async function moderationGet<T>(
+  pathWithQuery: string,
+  scope?: ModerationScope,
+): Promise<T> {
+  await assertModerationScope(scope);
+  const base = (
+    scope
+      ? scope.relayUrl.replace(/^ws:/, "http:").replace(/^wss:/, "https:")
+      : await getRelayHttpUrl()
+  ).replace(/\/+$/, "");
   const url = `${base}${pathWithQuery}`;
-  const authorization = await nip98GetHeader(url);
+  const authorization = await nip98GetHeader(url, scope);
+  await assertModerationScope(scope);
   const response = await fetch(url, {
     headers: { Authorization: authorization },
   });
@@ -246,7 +289,9 @@ async function moderationGet<T>(pathWithQuery: string): Promise<T> {
       `Moderation request failed (${response.status}): ${pathWithQuery}`,
     );
   }
-  return (await response.json()) as T;
+  const data = (await response.json()) as T;
+  await assertModerationScope(scope);
+  return data;
 }
 
 type RawReport = {
@@ -342,16 +387,20 @@ function toRestriction(b: RawRestriction): CommunityRestriction {
  * ordinary members receive 403. `status` filters (e.g. "open"); `limit` is
  * clamped relay-side.
  */
-export async function listReports(options?: {
-  status?: string;
-  limit?: number;
-}): Promise<ModerationReport[]> {
+export async function listReports(
+  options?: {
+    status?: string;
+    limit?: number;
+  },
+  scope?: ModerationScope,
+): Promise<ModerationReport[]> {
   const params = new URLSearchParams();
   if (options?.limit != null) params.set("limit", String(options.limit));
   if (options?.status) params.set("status", options.status);
   const query = params.toString();
   const rows = await moderationGet<RawReport[]>(
     query ? `/moderation/reports?${query}` : "/moderation/reports",
+    scope,
   );
   return rows.map(toReport);
 }

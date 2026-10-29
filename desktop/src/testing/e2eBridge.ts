@@ -1,3 +1,7 @@
+import {
+  createModerationJudgeFixture,
+  type ModerationJudgeFixture,
+} from "./moderationJudgeFixture";
 import * as React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -520,6 +524,7 @@ type E2eConfig = {
     /** Delay EOSE for membership snapshots after delivering the event. */
     relayMembershipEoseDelayMs?: number;
     relayRole?: "owner" | "admin" | "member" | null;
+    moderationJudge?: ModerationJudgeFixture;
     // Descriptors returned by the mocked `pick_and_upload_media` /
     // `upload_media_bytes` commands. Lets a spec drive the attachment flow
     // (e.g. a generic PDF) without a real upload pipeline. See
@@ -11139,6 +11144,14 @@ function sendToMockSocket(args: {
       }
     }
     if (channelIds.length === 0) {
+      // Ordinary IDs-only reads use the same stored messages as channel history.
+      if (filter.ids?.length) {
+        for (const event of selectMockHistory(mockMessages, [filter])) {
+          sendWsText(socket.handler, ["EVENT", subId, event]);
+        }
+        sendWsText(socket.handler, ["EOSE", subId]);
+        return;
+      }
       // Aux-backfill filters (reactions/deletions) are `#e`-keyed with no
       // channel tag — serve them across all channel stores like the relay.
       const referencedIds = filter["#e"];
@@ -12034,6 +12047,7 @@ export function maybeInstallE2eTauriMocks() {
       sourceUrl: null;
     };
   }> = [];
+  const moderationJudgeFixture = createModerationJudgeFixture();
   const handleMockCommand = async (
     command: string,
     payload: unknown,
@@ -12058,6 +12072,14 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
+      case "moderation_judge_status":
+      case "review_moderation_report":
+      case "cancel_moderation_review":
+        return moderationJudgeFixture(
+          command,
+          payload,
+          activeConfig?.mock?.moderationJudge,
+        );
       case "get_huddle_state": {
         const snapshot = mockHuddle ? structuredClone(mockHuddle.state) : null;
         const delayMs = activeConfig?.mock?.huddleStateReadDelayMs ?? 0;

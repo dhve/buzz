@@ -30,6 +30,8 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+#[cfg_attr(not(feature = "mesh-llm"), allow(dead_code))]
+mod moderation_judge;
 mod native_relay_client;
 mod native_websocket;
 mod native_websocket_batch;
@@ -527,6 +529,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            review_moderation_report,
+            cancel_moderation_review,
+            moderation_judge_status,
             terminal_runtime::terminal_attach,
             terminal_runtime::terminal_detach,
             terminal_runtime::terminal_close,

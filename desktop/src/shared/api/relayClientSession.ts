@@ -427,17 +427,17 @@ export class RelayClient {
   async subscribeInteractive(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
+    signal?: AbortSignal,
   ) {
     return this.subscribe(
       filter,
       onEvent,
       undefined,
       undefined,
-      undefined,
+      signal,
       "interactive",
     );
   }
-
   async preconnect() {
     // Explicit re-engagement (reconnect card / community switch): clears the
     // terminal latch and AUTH rejection streak, and bypasses backoff once.

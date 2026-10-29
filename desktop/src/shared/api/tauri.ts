@@ -361,9 +361,19 @@ export async function addChannelMembers(
 export async function removeChannelMember(
   channelId: string,
   pubkey: string,
+  scope?: { relayUrl: string; signerPubkey: string },
 ): Promise<void> {
   const record = beginChannelMembershipWrite();
-  await invokeTauri("remove_channel_member", { channelId, pubkey });
+  await invokeTauri("remove_channel_member", {
+    channelId,
+    pubkey,
+    ...(scope
+      ? {
+          expectedRelayUrl: scope.relayUrl,
+          expectedSignerPubkey: scope.signerPubkey,
+        }
+      : {}),
+  });
   record(channelId);
 }
 
@@ -536,8 +546,18 @@ export { editMessage } from "@/shared/api/editMessage";
 export async function deleteMessage(
   channelId: string,
   eventId: string,
+  scope?: { relayUrl: string; signerPubkey: string },
 ): Promise<void> {
-  await invokeTauri("delete_message", { channelId, eventId });
+  await invokeTauri("delete_message", {
+    channelId,
+    eventId,
+    ...(scope
+      ? {
+          expectedRelayUrl: scope.relayUrl,
+          expectedSignerPubkey: scope.signerPubkey,
+        }
+      : {}),
+  });
 }
 
 export async function addReaction(

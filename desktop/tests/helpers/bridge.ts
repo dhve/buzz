@@ -1,3 +1,4 @@
+import type { ModerationJudgeFixture } from "../../src/testing/moderationJudgeFixture";
 import type { Page } from "@playwright/test";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
@@ -146,6 +147,7 @@ type MockInstallRuntimeResult = {
 };
 
 type MockBridgeOptions = {
+  moderationJudge?: ModerationJudgeFixture;
   /** Tauri window label exposed to the app. Defaults to the main window. */
   windowLabel?: string;
   ttsSettings?: {

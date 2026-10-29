@@ -12,6 +12,7 @@ type SettingsSection =
   | "shortcuts"
   | "hosted-communities"
   | "tokens"
+  | "community-reports"
   | "community-members"
   | "mobile"
   | "updates";

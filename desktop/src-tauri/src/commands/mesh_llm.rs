@@ -156,7 +156,7 @@ fn restart_to_share(
 
 pub type CmdResult<T> = Result<T, String>;
 
-fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
+pub(crate) fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
     let normalized = url::Url::parse(relay_url.trim())
         .map(|url| url.origin().ascii_serialization())
         .unwrap_or_else(|_| relay_url.trim().trim_end_matches('/').to_ascii_lowercase());

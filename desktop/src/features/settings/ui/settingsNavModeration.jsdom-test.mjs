@@ -94,19 +94,26 @@ const STUB_PROPS = {
 
 // ── Harness ───────────────────────────────────────────────────────────────────
 
-function makeQueryClient(pubkeyHex) {
+function makeQueryClient(pubkeyHex, role) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: Infinity } },
   });
   qc.setQueryData(["identity"], { pubkey: pubkeyHex });
+  if (role)
+    qc.setQueryData(["myRelayMembershipLookup"], {
+      snapshotFound: true,
+      membershipRequired: true,
+      membership: { pubkey: pubkeyHex, role },
+    });
   return qc;
 }
 
 function mountSettingsView({
   section = "relay-admin",
+  role,
   onSectionChange = () => {},
 } = {}) {
-  const qc = makeQueryClient("ab".repeat(32));
+  const qc = makeQueryClient("ab".repeat(32), role);
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -285,4 +292,49 @@ test("settings-nav-groups-contains-relay-admin: relay-admin is wired into Commun
     communities.sections.includes("relay-admin"),
     `relay-admin must be in Communities; got: ${JSON.stringify(communities.sections)}`,
   );
+});
+
+// Removing the community-role gate exposes moderator data to ordinary members.
+test("Reports navigation follows community owner/admin authority", async () => {
+  for (const role of ["owner", "admin", "member"]) {
+    stubNoOrigin();
+    const view = mountSettingsView({ role });
+    try {
+      await view.doRender();
+      assert.equal(
+        !!view.container.querySelector(
+          '[data-testid="settings-nav-community-reports"]',
+        ),
+        role !== "member",
+      );
+      assert.ok(
+        view.container.querySelector(
+          '[data-testid="settings-nav-relay-admin"]',
+        ),
+      );
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+// A direct owner/admin link must survive the asynchronous role lookup.
+test("Reports deep link waits for community permission lookup without redirecting", async () => {
+  stubNoOrigin();
+  const changes = [];
+  const view = mountSettingsView({
+    section: "community-reports",
+    onSectionChange: (value) => changes.push(value),
+  });
+  try {
+    await view.doRender();
+    await settle();
+    assert.deepEqual(changes, []);
+    assert.match(
+      view.container.textContent,
+      /Checking community management permissions/,
+    );
+  } finally {
+    await view.unmount();
+  }
 });
